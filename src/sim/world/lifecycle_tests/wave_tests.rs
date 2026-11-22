@@ -1057,7 +1057,7 @@ fn wave_cliff_collapse_consumes_exact_body_rng_and_spawns_row_major_anims() {
     };
 
     let ini = crate::rules::ini_parser::IniFile::from_str(
-        "[CombatDamage]\nCollapseChance=100\n\
+        "[General]\nCliffBackImpassability=2\n[CombatDamage]\nCollapseChance=100\n\
          [InfantryTypes]\n\
          [VehicleTypes]\n0=FIRER\n\
          [AircraftTypes]\n[BuildingTypes]\n[OverlayTypes]\n0=DECAL\n\
@@ -1094,7 +1094,10 @@ fn wave_cliff_collapse_consumes_exact_body_rng_and_spawns_row_major_anims() {
     for ry in 0..16 {
         for rx in 0..16 {
             let on_bridge = ry == 10 && (10..=11).contains(&rx);
-            let mut cell = common_raw_terrain_cell(rx, ry, 1, on_bridge);
+            // This second replacement raises (3, 3) from 4 to 5 after
+            // the first replacement has recalculated (2, 2) at level 1.
+            let level = if (rx, ry) == (3, 3) { 5 } else { 1 };
+            let mut cell = common_raw_terrain_cell(rx, ry, level, on_bridge);
             if rx < 6 && ry < 4 {
                 let sub_tile = (ry * 6 + rx) as u8;
                 if ![0, 5, 18, 23].contains(&usize::from(sub_tile)) {
@@ -1248,6 +1251,21 @@ fn wave_cliff_collapse_consumes_exact_body_rng_and_spawns_row_major_anims() {
         expected_rng.logical_state()
     );
     assert_eq!(sim.dynamic_terrain_cells.len(), 20);
+    let zones = sim.zone_grid.as_ref().unwrap();
+    let terrain = sim.resolved_terrain.as_ref().unwrap();
+    assert_eq!(
+        terrain.cell(2, 2).unwrap().zone_type,
+        crate::map::resolved_terrain::zone_class::IMPASSABLE
+    );
+    // 56C510 used the first, open reading. The old-footprint Recalc after
+    // it published Rock and left the already assigned connectivity ID alone.
+    assert!(zones.can_reach(
+        MovementZone::Normal,
+        (2, 2),
+        MovementLayer::Ground,
+        (6, 5),
+        MovementLayer::Ground,
+    ));
     let published = sim
         .lighting_sources
         .pending()
