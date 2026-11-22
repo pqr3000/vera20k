@@ -786,12 +786,13 @@ impl Simulation {
             .is_some_and(|terrain| terrain.is_destroyable_cliff(rx, ry));
         if destroyable_cliff {
             let chance_draw = self.scenario_rng.next_range_u32_inclusive(0, 99) as i32;
+            let cliff_back_rock = overlay_registry.and_then(|registry| registry.cliff_back_rock());
             if chance_draw < rules.combat_damage.collapse_chance
                 && let Some(mutation) = self.resolved_terrain.as_mut().and_then(|terrain| {
-                    terrain.collapse_destroyable_cliff_terrain(
+                    terrain.stamp_destroyable_cliff_terrain(
                         rx,
                         ry,
-                        overlay_registry.and_then(|registry| registry.cliff_back_rock()),
+                        cliff_back_rock,
                         |cell_x, cell_y| {
                             if let Some(grid) = self.overlay_grid.as_mut() {
                                 let _ = grid.clear_overlay(cell_x, cell_y);
@@ -813,11 +814,17 @@ impl Simulation {
                         .chain(&mutation.changed_cells)
                         .copied(),
                 );
-                // Native performs one complete zone rebuild after the
-                // two sparse stamps and before its three footprint
-                // passes. The Rust navigation owner rebuilds all
-                // movement zones as the corresponding single unit.
-                self.rebuild_dynamic_navigation(rules);
+                // Both collapse families call 56C510 (5812AC/581995) after
+                // the two stamps and before the old footprint is recalculated.
+                self.rebuild_dynamic_navigation_after_recalc(rules, mutation.stamped_cells(), true);
+                self.resolved_terrain
+                    .as_mut()
+                    .expect("cliff stamped on this terrain")
+                    .recalc_collapsed_cliff_footprint(&mutation, cliff_back_rock);
+                // 0x58137B / 0x581A7A recalculate the old footprint after the
+                // connectivity pass. Neighbours receiving only LAT tile fixups
+                // have no class or height publication.
+                self.publish_recalculated_cells(rules, &mutation.original_footprint);
 
                 // Pass three's externally represented effects remain
                 // strictly interleaved: detach this CellClass target,

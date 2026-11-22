@@ -599,6 +599,13 @@ impl Simulation {
             actor.clear_live_path_head();
         }
         let Some(answer) = self.find_path_target_answer(id, request.destination, rules)? else {
+            log::trace!(
+                target: "vera20k::path",
+                "Find_Path frame={frame} unit={id} movement={:?} from={:?} to={:?} refused by Foot zone precheck before A*",
+                request.snapshot().movement_zone,
+                self.substrate.entities.get(id).map(|e| (e.position.rx(), e.position.ry())),
+                coord_cell(request.destination)
+            );
             self.substrate.clear_path_head(id);
             return Ok(FindPathResult::Failed);
         };
@@ -688,8 +695,10 @@ impl Simulation {
         }
         #[cfg(test)]
         self.export_bridge_engineer_entry_inputs(id, rules, "mark0");
-        let searched = match self.take_batched_search(request, goal, rules) {
-            Some(searched) => searched,
+        let batch_answer = self.take_batched_search(request, goal, rules);
+        let from_batch = batch_answer.is_some();
+        let searched = match batch_answer {
+            Some(directions) => Ok(directions),
             None => {
                 //The blocker plane must see Mark0, including the actor's
                 //removal: the kept plane follows it through the touch log
@@ -738,6 +747,16 @@ impl Simulation {
                 }
             }
         };
+        log::trace!(
+            target: "vera20k::path",
+            "Find_Path frame={frame} unit={id} movement={:?} from={:?} requested={:?} goal={:?} urgency={} from_batch={from_batch} result={:?}",
+            request.snapshot().movement_zone,
+            self.substrate.entities.get(id).map(|e| (e.position.rx(), e.position.ry())),
+            coord_cell(request.destination),
+            coord_cell(goal),
+            request.urgency,
+            searched.as_ref().map(Vec::len),
+        );
         //4D3E82..3E9F copies a successful route before Mark1's callbacks.
         if let Ok(directions) = &searched {
             let actor = self

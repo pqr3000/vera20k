@@ -8,8 +8,8 @@ use std::sync::Arc;
 use crate::map::overlay::OverlayEntry;
 use crate::map::resolved_terrain::ResolvedTerrainGrid;
 use crate::rules::ruleset::RuleSet;
-use crate::sim::overlay_grid::damage_wall_overlay_with_runtime_host;
 use crate::sim::overlay_grid::recalc_overlay_passability;
+use crate::sim::overlay_grid::{OverlayGrid, damage_wall_overlay_with_runtime_host};
 use crate::sim::pathfinding::PathGrid;
 use crate::sim::pathfinding::terrain_speed;
 use crate::sim::pathfinding::zone_incremental::ZoneRepairKind;
@@ -152,9 +152,25 @@ impl Simulation {
     /// Rebuild dynamic structure blockers, zones, and the canonical PathGrid
     /// as one simulation-owned projection.
     pub fn rebuild_dynamic_navigation(&mut self, rules: &RuleSet) -> bool {
+        self.rebuild_dynamic_navigation_after_recalc(rules, [], false)
+    }
+
+    /// Publish the cells that ran RecalcAttributes. An explicit 56C510 call
+    /// must also consume class or height writes made before this batch.
+    pub(crate) fn rebuild_dynamic_navigation_after_recalc(
+        &mut self,
+        rules: &RuleSet,
+        recalculated: impl IntoIterator<Item = (u16, u16)>,
+        full_connectivity: bool,
+    ) -> bool {
         let Some(terrain) = self.resolved_terrain.as_ref() else {
             return false;
         };
+        let overlay_cells = self
+            .overlay_grid
+            .as_mut()
+            .map(OverlayGrid::take_synchronous_navigation_cells)
+            .unwrap_or_default();
         let result = navigation::NavigationCaches {
             zones: &mut self.zone_grid,
             path: &mut self.path_grid,
@@ -167,6 +183,8 @@ impl Simulation {
             &self.substrate.entities,
             &self.interner,
             rules,
+            overlay_cells.into_iter().chain(recalculated),
+            full_connectivity,
         );
         match result {
             Ok(cells) => self.structure_navigation_cells = cells,
@@ -183,13 +201,30 @@ impl Simulation {
     /// zone map is built from terrain movement classes, which structures do
     /// not change; zone IDs therefore stay as they are.
     fn publish_structure_navigation(&mut self, rules: &RuleSet) {
+        let Some(terrain) = self.resolved_terrain.as_ref() else {
+            return;
+        };
         let current =
             navigation::structure_movement_cells(&self.substrate.entities, &self.interner, rules);
-        let candidates: Vec<_> = current
-            .union(&self.structure_navigation_cells)
-            .copied()
-            .collect();
-        self.publish_recalculated_cells_with_presence(rules, &candidates, &current);
+        let mut caches = navigation::NavigationCaches {
+            zones: &mut self.zone_grid,
+            path: &mut self.path_grid,
+            overlays: self.overlay_grid.as_ref(),
+            playfield_bounds: self.playfield_bounds,
+        };
+        for &(x, y) in current.union(&self.structure_navigation_cells) {
+            let Some(cell) = terrain.cell(x, y) else {
+                continue;
+            };
+            if let Err(error) =
+                caches.publish_path_cell_with_presence(terrain, cell, current.contains(&(x, y)))
+            {
+                log::warn!("Structure navigation publication fell back to a rebuild: {error}");
+                let _ = self.rebuild_dynamic_navigation(rules);
+                return;
+            }
+        }
+        self.structure_navigation_cells = current;
     }
 
     /// Finalize mutable overlay identity, passability, and canonical navigation
@@ -242,7 +277,7 @@ impl Simulation {
         }
 
         if navigation_rebuild_requested {
-            let _ = self.rebuild_dynamic_navigation(rules);
+            let _ = self.rebuild_dynamic_navigation_after_recalc(rules, navigation_cells, false);
         } else {
             if structures_changed {
                 self.publish_structure_navigation(rules);

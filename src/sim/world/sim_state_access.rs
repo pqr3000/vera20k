@@ -1017,6 +1017,18 @@ impl Simulation {
     /// Install a newly constructed map grid and capture the real CellClass
     /// `0x1180` value authority after row-major OverlayPack marking.
     pub fn install_resolved_terrain_for_new_map(&mut self, resolved_terrain: ResolvedTerrainGrid) {
+        if self.resolved_terrain.is_some()
+            && !self
+                .zone_grid
+                .as_ref()
+                .is_some_and(ZoneGrid::is_native_load_pending)
+        {
+            // A replacement map owns a fresh Map+68 plane even when both maps
+            // have the same Size. A pending snapshot already owns its plane.
+            self.zone_grid = None;
+            self.path_grid = None;
+            self.structure_navigation_cells.clear();
+        }
         let grid = resolved_terrain.cell_grid();
         self.houses.configure_cell_grid(grid);
         self.terrain_objects.configure_cell_grid(grid);

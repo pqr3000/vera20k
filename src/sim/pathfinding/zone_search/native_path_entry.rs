@@ -280,6 +280,10 @@ pub(super) fn prepare_native_path_entry(
     let endpoints_in_playfield = allow_hierarchy
         && live_mode_one(&cells, bounds, hierarchy_start)
         && live_mode_one(&cells, bounds, hierarchy_goal);
+    log::trace!(
+        target: "vera20k::path",
+        "AStar entry movement={movement:?} from={start:?} zone={source_zone:?} bridge={start_bridge} to={goal:?} zone={goal_zone:?} bridge={query_goal_bridge} projected={hierarchy_start:?}->{hierarchy_goal:?} hierarchy={endpoints_in_playfield}"
+    );
     NativePathEntry {
         raw_equal: source_zone.zip(goal_zone).map(|(a, b)| a == b),
         goal_bridge,

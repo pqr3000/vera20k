@@ -2,6 +2,7 @@
 
 use super::{gsi_04_10_clear_terrain, make_test_entity};
 use crate::map::entities::EntityCategory;
+use crate::map::resolved_terrain::ResolvedTerrainGrid;
 use crate::rules::ini_parser::IniFile;
 use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
@@ -9,6 +10,165 @@ use crate::sim::overlay_grid::OverlayGrid;
 use crate::sim::production::{ProductionCategory, enqueue_by_type};
 use crate::sim::snapshot::GameSnapshot;
 use crate::sim::world::{Simulation, TickLane};
+
+fn reload_player_map(
+    world: &Simulation,
+    terrain: &ResolvedTerrainGrid,
+    rules: &RuleSet,
+    overlays: &OverlayTypeRegistry,
+) -> Simulation {
+    let land = terrain
+        .capture_user_saved_template(world.resolved_terrain().unwrap())
+        .unwrap()
+        .user_load_land_values()
+        .unwrap();
+    let bytes = GameSnapshot::save(world, 0, 0, "water.map", 0);
+    let mut loaded = GameSnapshot::load(&bytes).unwrap().sim;
+    loaded.restore_after_snapshot_load().unwrap();
+    loaded.rebuild_caches_after_load(terrain.clone(), Default::default(), rules);
+    loaded
+        .restore_map_authority_after_user_load(rules, overlays, None, land)
+        .unwrap();
+    loaded
+}
+
+#[test]
+fn dynamic_rebuild_keeps_saved_water_zones_after_player_load() {
+    use crate::map::resolved_terrain::zone_class;
+    use crate::rules::locomotor_type::MovementZone;
+
+    let (rules, overlays) = rules_and_overlays();
+    let terrain = super::water_terrain(16, 16);
+    let mut sim = Simulation::with_seed(47);
+    sim.install_resolved_terrain_for_new_map(terrain.clone());
+    sim.overlay_grid = Some(OverlayGrid::new(16, 16));
+    assert!(sim.rebuild_dynamic_navigation(&rules));
+    let mut loaded = reload_player_map(&sim, &terrain, &rules, &overlays);
+    let water_zone = |world: &Simulation| {
+        world
+            .zone_grid()
+            .unwrap()
+            .get_zone_id_nonbridge_native((7, 6), MovementZone::Water)
+    };
+    assert_eq!(water_zone(&loaded), Some(2));
+    assert_eq!(
+        loaded
+            .resolved_terrain()
+            .unwrap()
+            .cell(7, 6)
+            .unwrap()
+            .zone_type,
+        zone_class::GROUND
+    );
+    assert!(loaded.rebuild_dynamic_navigation(&rules));
+    assert_eq!(water_zone(&loaded), Some(2));
+
+    let mut yard = crate::sim::game_entity::GameEntity::test_default_of_category(
+        9,
+        "YARD",
+        "Americans",
+        7,
+        6,
+        EntityCategory::Structure,
+    );
+    yard.set_type_ref_for_test(loaded.interner.intern("YARD"));
+    yard.lifecycle.set_cell_marked_for_test(true);
+    loaded.substrate.entities.insert(yard);
+    assert!(
+        loaded
+            .finalize_frame_overlays_and_navigation(&rules, Some(&overlays), false, true)
+            .is_empty()
+    );
+    // Refreshing a footprint changes path occupation. A later full rebuild
+    // still reads water from the retained Map+68 record under the structure.
+    loaded.rebuild_zone_grid_full(loaded.path_grid_snapshot().unwrap());
+    assert_eq!(water_zone(&loaded), Some(2));
+
+    loaded.install_resolved_terrain_for_new_map(gsi_04_10_clear_terrain(16, 16));
+    assert!(loaded.rebuild_dynamic_navigation(&rules));
+    assert_eq!(water_zone(&loaded), Some(1));
+}
+
+#[test]
+fn shipyard_mark_and_unmark_preserve_water_after_player_load() {
+    use crate::map::resolved_terrain::{install_water_repair_test_catalog, zone_class};
+    use crate::rules::retail_ini_fixture::retail_battle_rules;
+    use crate::sim::game_entity::GameEntity;
+
+    let Some(retail) = retail_battle_rules() else {
+        return;
+    };
+    let rules = &retail.rules;
+    for resident_tiles in [true, false] {
+        let mut terrain = super::water_terrain(16, 16);
+        for cell in terrain.cells_mut_for_test() {
+            cell.final_tile_index = 1;
+        }
+        // The yard straddles the shore. Its land anchor is a walkable
+        // foundation cell until the building occupies it.
+        *terrain.cell_mut_for_test(7, 7).unwrap() =
+            gsi_04_10_clear_terrain(16, 16).cell(7, 7).unwrap().clone();
+        terrain.set_land_speed_rules_for_test(&rules.terrain_rules);
+        if resident_tiles {
+            install_water_repair_test_catalog(&mut terrain);
+        }
+        let mut sim = Simulation::with_seed(0x5683c0);
+        sim.session.set_map_width_for_test(16);
+        sim.session.set_map_height_for_test(16);
+        sim.install_resolved_terrain_for_new_map(terrain.clone());
+        sim.overlay_grid = Some(OverlayGrid::new(16, 16));
+        assert!(sim.rebuild_dynamic_navigation(rules));
+        let yard_id = sim.substrate.allocate_stable_id();
+        let mut yard = GameEntity::test_default_of_category(
+            yard_id,
+            "GAYARD",
+            "Americans",
+            7,
+            7,
+            EntityCategory::Structure,
+        );
+        yard.set_type_ref_for_test(sim.interner.intern("GAYARD"));
+        yard.set_owner_for_test(sim.interner.intern("Americans"));
+        yard.lifecycle.set_in_limbo_for_test(false);
+        yard.seldom
+            .type_facts
+            .set_foundation_for_test(rules.object("GAYARD").unwrap().foundation.clone().into());
+        sim.substrate.entities.insert(yard);
+        for put in [true, false] {
+            sim = reload_player_map(&sim, &terrain, rules, rules.overlay_registry());
+            let live_class = |world: &Simulation, x, y| {
+                world
+                    .resolved_terrain()
+                    .unwrap()
+                    .cell(x, y)
+                    .unwrap()
+                    .zone_type
+            };
+            assert_eq!(live_class(&sim, 7, 8), zone_class::GROUND);
+            assert_eq!(sim.path_grid().unwrap().is_walkable(7, 7), put);
+            let context = super::UninitContext::new(rules);
+            assert!(if put {
+                sim.mark_entity_put(yard_id, context)
+            } else {
+                sim.unmark_entity_remove(yard_id, context)
+            });
+            assert_eq!(sim.path_grid().unwrap().is_walkable(7, 7), !put);
+            assert_eq!(
+                sim.zone_grid().unwrap().base_movement_class_at(7, 8),
+                Some(zone_class::WATER)
+            );
+            assert_eq!(
+                live_class(&sim, 7, 8),
+                if resident_tiles {
+                    zone_class::WATER
+                } else {
+                    zone_class::GROUND
+                }
+            );
+            assert_eq!(live_class(&sim, 6, 8), zone_class::GROUND);
+        }
+    }
+}
 
 #[test]
 fn native_bridge_record_geometry_changes_rebuild_and_restore_navigation() {
@@ -467,6 +627,8 @@ fn structure_changes_publish_footprint_cells_without_rebuilding_zones() {
 
 #[test]
 fn structure_mark_publishes_presence_and_preserves_other_marked_blockers() {
+    use crate::sim::movement::locomotor::MovementLayer;
+    use crate::sim::occupancy::BUILDING_OCCUPATION_BIT;
     let (rules, _overlays) = rules_and_overlays();
     let mut context = super::UninitContext::new(&rules);
     let mut sim = Simulation::with_seed(0x43f180);
@@ -483,6 +645,11 @@ fn structure_mark_publishes_presence_and_preserves_other_marked_blockers() {
             EntityCategory::Structure,
         );
         structure.set_type_ref_for_test(sim.interner.intern("YARD"));
+        structure.set_on_bridge(id == 10);
+        // Building Unlimbo retains the ground Z even on the deck list.
+        // DropAsBomb keeps that Location when it clears OnBridge.
+        structure.position.put_z(0);
+        structure.lifecycle.set_in_limbo_for_test(false);
         structure
             .seldom
             .type_facts
@@ -499,6 +666,30 @@ fn structure_mark_publishes_presence_and_preserves_other_marked_blockers() {
         .death
         .set_dying_for_test(true);
     assert!(sim.unmark_entity_remove(9, context.reborrow()));
+    assert_only_marked_foundation(&sim);
+    assert_eq!(
+        sim.substrate
+            .occupancy
+            .count_on_layer(6, 6, MovementLayer::Bridge),
+        1
+    );
+    assert_eq!(
+        sim.substrate.raw_cell_occupation.ground_bits(6, 6) & BUILDING_OCCUPATION_BIT,
+        0
+    );
+    // BlowUpBridge calls DropAsBomb on its deck list. Mark(PUT) on the
+    // ground writes back the raw bit the overlapping building cleared.
+    sim.drop_as_bomb(10, context.reborrow());
+    assert_eq!(
+        sim.substrate
+            .occupancy
+            .count_on_layer(6, 6, MovementLayer::Ground),
+        1
+    );
+    assert_eq!(
+        sim.substrate.raw_cell_occupation.ground_bits(6, 6) & BUILDING_OCCUPATION_BIT,
+        BUILDING_OCCUPATION_BIT
+    );
     assert_only_marked_foundation(&sim);
     assert!(sim.unmark_entity_remove(10, context.reborrow()));
     assert_eq!(*sim.path_grid_snapshot().unwrap(), *empty);

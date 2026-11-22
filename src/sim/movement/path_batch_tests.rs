@@ -11,6 +11,9 @@ use crate::sim::overlay_grid::OverlayGrid;
 use crate::sim::world::FrameEffects;
 use crate::util::fixed_math::SIM_ONE;
 
+#[path = "path_batch_blocked_crossing_tests.rs"]
+mod blocked_crossing;
+
 const EAST: u16 = 0x4000;
 const WEST: u16 = 0xC000;
 const WEST_STEP: u8 = 6;
@@ -613,7 +616,7 @@ fn batched_answers_do_not_depend_on_the_threads() {
     for &(id, request) in &movers {
         let alone =
             dummy.detached(|| sim.batched_search(id, request, &rules, &grid, counts, None, None));
-        routes += usize::from(alone.as_ref().is_some_and(|answer| answer.found.is_ok()));
+        routes += usize::from(alone.is_some());
         assert_eq!(ready[&id].answer, alone, "mover {id}");
     }
     assert_eq!(routes, movers.len(), "every mover routes");
@@ -1541,7 +1544,7 @@ fn a_repath_past_the_budget_stops_or_does_not_start() {
             let alone: Vec<(Option<BatchedSearch>, u64)> =
                 foots.iter().map(|&id| search(id, None)).collect();
             for (answer, steps) in &alone {
-                assert!(answer.as_ref().is_some_and(|answer| answer.found.is_ok()));
+                assert!(answer.is_some());
                 assert!(*steps >= 2048, "{steps} expansions ask twice");
             }
             // Stopped at its first ask, a search ends there with no answer.
@@ -1877,6 +1880,7 @@ fn an_own_cell_request_claims_the_frames_answer() {
 #[test]
 fn a_mover_allowed_to_leave_the_map_searches_across_zones() {
     use crate::map::resolved_terrain::zone_class;
+    use crate::sim::movement::movement_path::MovePathFailure;
     use crate::sim::pathfinding::BlockerNeighborCounts;
     use crate::sim::pathfinding::zone_search::PathSearchFailure as Search;
 

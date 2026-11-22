@@ -975,7 +975,7 @@ impl Simulation {
             .as_ref()
             .ok_or("Drive/Ship candidate query requires map cells")?;
         let native_cell = terrain.native_cell_identity(cell);
-        self.foot_can_enter(
+        let answer = self.foot_can_enter(
             call.id,
             native_cell,
             InfantryEntryArgs {
@@ -984,7 +984,15 @@ impl Simulation {
                 previous_cell: None,
             },
             call.rules,
-        )
+        );
+        if answer != Ok(0) {
+            log::trace!(
+                target: "vera20k::path",
+                "Drive/Ship Can_Enter_Cell frame={} unit={} next={cell:?} direction={direction} path_height={height} answer={answer:?}",
+                self.session.binary_frame(), call.id,
+            );
+        }
+        answer
     }
 
     fn track_object<'r>(

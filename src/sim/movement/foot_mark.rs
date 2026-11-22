@@ -292,7 +292,7 @@ impl Simulation {
             #[cfg(any(test, feature = "test-support"))]
             self.trace_lifecycle_for_test(LifecycleTestEvent::RawOccupationCleared);
         }
-        self.recalculate_track_cell(cell, rules, registry);
+        self.recalculate_placement_cell(cell, rules, registry, false);
     }
 
     pub(crate) fn foot_mark_put(
@@ -376,7 +376,7 @@ impl Simulation {
             #[cfg(any(test, feature = "test-support"))]
             self.trace_lifecycle_for_test(LifecycleTestEvent::RawOccupationMarked);
         }
-        self.recalculate_track_cell(cell, rules, registry);
+        self.recalculate_placement_cell(cell, rules, registry, false);
     }
 
     /// The Cell Pick_Up/Place_Down address and the OnBridge list, or `None`

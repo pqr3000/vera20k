@@ -821,7 +821,7 @@ fn destroyable_cliff_a_collapses_old_sparse_footprint_then_stamps_two_halves() {
     grid.test_install_destroyable_cliff_catalog(100);
 
     let mutation = grid
-        .collapse_destroyable_cliff_terrain(4, 1, None, |_, _| {})
+        .stamp_destroyable_cliff_terrain(4, 1, None, |_, _| {})
         .expect("family-A destroyable cliff");
 
     assert_eq!(mutation.family, DestroyableCliffFamily::A);
@@ -884,8 +884,10 @@ fn destroyable_cliff_collapse_turns_land_under_a_higher_neighbour_to_rock() {
         speed_costs: SpeedCostProfile::ZERO,
     };
 
-    grid.collapse_destroyable_cliff_terrain(4, 2, Some(&rock), |_, _| {})
+    let mutation = grid
+        .stamp_destroyable_cliff_terrain(4, 2, Some(&rock), |_, _| {})
         .expect("family-A destroyable cliff");
+    grid.recalc_collapsed_cliff_footprint(&mutation, Some(&rock));
 
     let behind = grid.cell(3, 1).unwrap();
     assert_eq!(behind.land_type, LandType::Rock.as_index());
@@ -940,7 +942,7 @@ fn destroyable_cliff_origin_recovery_accepts_every_present_a_and_b_subtile() {
             );
 
             let mutation = grid
-                .collapse_destroyable_cliff_terrain(selected.0, selected.1, None, |_, _| {})
+                .stamp_destroyable_cliff_terrain(selected.0, selected.1, None, |_, _| {})
                 .expect("present sparse subtile selects its family");
 
             assert_eq!(mutation.family, family);

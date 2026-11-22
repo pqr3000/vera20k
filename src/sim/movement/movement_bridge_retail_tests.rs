@@ -42,6 +42,9 @@ const MAX_TICKS: u64 = 2000;
 #[path = "hills_native_integration_tests.rs"]
 mod hills_native_integration_tests;
 
+#[path = "path_crossing_tests.rs"]
+mod path_crossing_tests;
+
 #[path = "bridge_restamp_retail_probe.rs"]
 mod bridge_restamp_retail_probe;
 #[path = "bridge_tile_retail_probe.rs"]

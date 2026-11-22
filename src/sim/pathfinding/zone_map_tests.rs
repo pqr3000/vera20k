@@ -482,7 +482,8 @@ fn gsi_04_06_simulation_detects_class_only_change_with_identical_pathgrid() {
 
     sim.resolved_terrain.as_mut().unwrap().cells_mut_for_test()[0].zone_type =
         zone_class::CRUSHABLE;
-    sim.rebuild_zone_grid(&path_grid);
+    let rules = crate::rules::ruleset::RuleSet::empty_for_test();
+    sim.rebuild_dynamic_navigation_after_recalc(rules, [(0, 0)], false);
 
     let zones = sim.zone_grid.as_ref().unwrap();
     assert_eq!(
@@ -495,6 +496,20 @@ fn gsi_04_06_simulation_detects_class_only_change_with_identical_pathgrid() {
     assert_ne!(
         zones
             .map_for(MovementZone::Crusher)
+            .unwrap()
+            .zone_at(0, 0, MovementLayer::Ground),
+        ZONE_INVALID
+    );
+
+    // A later Recalc can publish before a collapse requests 56C510. All
+    // inputs at the stamped cell already match when that request runs.
+    sim.resolved_terrain.as_mut().unwrap().cells_mut_for_test()[0].zone_type = zone_class::GROUND;
+    sim.publish_recalculated_cells(rules, &[(0, 0)]);
+    assert!(sim.rebuild_dynamic_navigation_after_recalc(rules, [(0, 0)], true));
+    assert_ne!(
+        sim.zone_grid()
+            .unwrap()
+            .map_for(MovementZone::Normal)
             .unwrap()
             .zone_at(0, 0, MovementLayer::Ground),
         ZONE_INVALID

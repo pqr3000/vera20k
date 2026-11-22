@@ -10,8 +10,8 @@
 //! run out. With batching on, either registers the Foot and takes the
 //! timer-still-running branch instead. At the start of the next frame's live
 //! object pass the registrations are searched on worker threads against the
-//! world as it stands, up to a cap (below), and the Foot's request then runs
-//! its Find_Path with the answer.
+//! world as it stands, up to a cap (below). At its own turn the Foot runs
+//! Find_Path and can reuse a successful route from the batch.
 //!
 //! Sim-scale deviation from native order (update order and
 //! same-frame effects), pending side-by-side play: a Foot's path search runs
@@ -29,10 +29,10 @@
 //! visible cases: Infantry Scatter's immediate Process (0x51D478) waits, so
 //! scattered infantry leave a frame later; a Drive/Ship Foot whose track
 //! ends with no path left loses that frame's movement where native's timer
-//! had run out. Through these requests a Foot searches at most once a
-//! frame, and only when the pass answered it: its first request that frame
-//! takes the answer, or searches for itself when none fits, and any other
-//! waits. That includes the requests of a refused cell's recursion (Walk's
+//! had run out. A Foot claims at most one scheduled turn per frame. Its
+//! first request in that turn takes the saved route or searches the live
+//! world if none fits. Any further request waits. That includes the
+//! requests of a refused cell's recursion (Walk's
 //! admission retries, which expire the timer; Drive/Ship's Process_Movement
 //! re-entries, of which the 0x4B4541 tail expires it) and a code-2 re-path
 //! right after a found route, whose timer Find_Path left run out. So a Foot
@@ -63,7 +63,7 @@
 //! new route's first track runs straight.
 //! Hover's own timer-gated Find_Path is not batched.
 //! The batch draws no random numbers; later draws follow the changed
-//! movement. Each search reads only that frame-start world, so no result
+//! movement. Each worker reads the same frame-start world, so no result
 //! depends on the thread count. Simulations start without batching; real
 //! matches and sim-bench turn it on ([`Simulation::batch_path_searches`]).
 //!
@@ -148,6 +148,13 @@
 //! and takes the answer in place of its core search only when the request
 //! and the Foot's own search inputs are the ones the answer was computed for
 //! ([`FootSearchKey`]); otherwise it searches as usual.
+//! Only routes can be reused. At the Foot's turn the locomotor checks the
+//! next cell again. A frame-start failure has no step to check: a blocker
+//! may already have left, and a false NULL from Find_Path would stop the
+//! driver and clear a distant NavCom (0x004D4044, 0x004D4143). A Foot whose
+//! batch found no route uses its scheduled turn to search the live world.
+//! This can run a second bounded search on a permanently blocked path.
+//! The expansion count in [`PathBatchStats`] covers the worker pass.
 //!
 //! The batch searches before Mark0 lifts the Foot off its cell; see
 //! [`MoverLift::Emulated`] for what the search emulates and drops. The
@@ -172,7 +179,6 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::foot_path::MoverLift;
-use super::movement_path::MovePathFailure;
 use super::movement_tick::FootPathRequest;
 use crate::map::entities::EntityCategory;
 use crate::map::resolved_terrain::ResolvedTerrainGrid;
@@ -185,7 +191,6 @@ use crate::sim::game_entity::GameEntity;
 use crate::sim::intern::InternedId;
 use crate::sim::mission::MissionId;
 use crate::sim::overlay_grid::OverlayGrid;
-use crate::sim::pathfinding::zone_search::PathSearchFailure;
 use crate::sim::pathfinding::{BlockerNeighborCounts, PathGrid, search_steps};
 use crate::sim::radio::Contacts;
 use crate::sim::world::{EntryFacts, Simulation};
@@ -524,7 +529,7 @@ struct ReadySlot {
 #[derive(Clone, Debug, PartialEq)]
 struct BatchedSearch {
     key: FootSearchKey,
-    found: Result<Vec<i32>, MovePathFailure>,
+    directions: Vec<i32>,
 }
 
 /// What a core search reads from its request and its mover besides the
@@ -644,11 +649,11 @@ impl Simulation {
         {
             return false;
         }
-        let request = match (request, batch.left_out_code2.get(&id)) {
-            (WaitingRequest::Code2Ladder { .. }, Some(&urgency)) => {
-                WaitingRequest::Code2Ladder { urgency }
-            }
-            (WaitingRequest::NoQueue, _) => batch
+        let request = match request {
+            WaitingRequest::Code2Ladder { urgency } => WaitingRequest::Code2Ladder {
+                urgency: batch.left_out_code2.get(&id).copied().unwrap_or(urgency),
+            },
+            WaitingRequest::NoQueue => batch
                 .left_out_recursions
                 .get(&id)
                 .copied()
@@ -692,7 +697,7 @@ impl Simulation {
         request: &FootPathRequest,
         goal: DriveCoord,
         rules: &RuleSet,
-    ) -> Option<Result<Vec<i32>, MovePathFailure>> {
+    ) -> Option<Vec<i32>> {
         // Only ordinary zero-prefix requests register with the batch. A
         // train extending its last queued step has a different search origin.
         if request.retain_head {
@@ -719,7 +724,7 @@ impl Simulation {
         {
             batch.used[slot.request.kind()] += 1;
         }
-        Some(answer.found)
+        Some(answer.directions)
     }
 
     /// The start of the live object pass: search for the Foots registered
@@ -741,25 +746,28 @@ impl Simulation {
         batch.ready.clear();
         #[cfg(any(test, feature = "test-support"))]
         batch.answered.clear();
-        let pending = std::mem::take(&mut batch.pending);
         // Last pass's left-outs went into this frame's registrations.
         batch.left_out_code2.clear();
         batch.left_out_recursions.clear();
+        let pending = &mut batch.pending;
         if pending.is_empty() {
             batch.stats.finish(started.elapsed(), 0, 0, 0, 0, [0; 2]);
             return;
         }
-        // A Foot's latest registration this frame stands: its latest state
-        // makes the request it repeats.
-        let pending: Vec<(u64, WaitingRequest)> = pending
-            .into_iter()
-            .collect::<BTreeMap<_, _>>()
-            .into_iter()
-            .collect();
+        // A stable sort keeps repeated requests in issue order. Keep the
+        // latest for each Foot and retain the queue allocation for next frame.
+        pending.sort_by_key(|entry| entry.0);
+        pending.dedup_by(|later, earlier| {
+            if later.0 != earlier.0 {
+                return false;
+            }
+            earlier.1 = later.1;
+            true
+        });
         let waiting = pending.len();
         let mut repath_turns: [Vec<(u64, WaitingRequest)>; 2] = Default::default();
         let mut others = Vec::new();
-        for entry in pending {
+        for entry in pending.drain(..) {
             match entry.1.repath_turn() {
                 Some(turn) => repath_turns[turn].push(entry),
                 None => others.push(entry),
@@ -825,6 +833,11 @@ impl Simulation {
             batch.answered = batch.ready.keys().copied().collect();
         }
         let answered = batch.ready.len();
+        log::trace!(
+            target: "vera20k::path",
+            "path batch frame={} waiting={waiting} scheduled={searched} answered={answered} expanded={expanded}",
+            self.session.binary_frame(),
+        );
         batch.stats.finish(
             started.elapsed(),
             waiting,
@@ -1054,20 +1067,21 @@ impl Simulation {
             facts,
             keep_searching,
         );
-        if read_own_cell
-            || matches!(
-                found,
-                Err(MovePathFailure::MissingGrid
-                    | MovePathFailure::Search(
-                        PathSearchFailure::CellEntryUnavailable(_) | PathSearchFailure::Stopped
-                    ))
-            )
-        {
+        if read_own_cell {
             return None;
         }
+        let directions = found
+            .inspect_err(|reason| {
+                log::trace!(
+                    target: "vera20k::path",
+                    "frame-start search frame={} unit={id} to={:?} result={reason:?}",
+                    self.session.binary_frame(), super::foot_path::coord_cell(goal),
+                );
+            })
+            .ok()?;
         Some(BatchedSearch {
             key: self.foot_search_key(&request, goal, rules)?,
-            found,
+            directions,
         })
     }
 

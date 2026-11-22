@@ -584,7 +584,10 @@ impl Simulation {
         }
 
         if let Some(terrain) = self.resolved_terrain.as_mut() {
-            terrain.recalc_playfield_attributes(bounds);
+            let recalculated = terrain.recalc_playfield_attributes(bounds);
+            if let Some(zones) = self.zone_grid.as_mut() {
+                zones.publish_recalculated_base_cells(terrain, recalculated);
+            }
         }
 
         // Rebuild from the retained structure-blocked PathGrid. PathGrid does

@@ -67,7 +67,7 @@ fn ordinary_foot_input_matches_native_admission_rows() {
                 },
             },
         };
-        let result = resolve_foot_cell_click(&map, &click, |id| {
+        let result = resolve_foot_cell_click(index as u64, &map, &click, |id| {
             Ok(match id {
                 NativeCellIdentity::Real(_) => {
                     !input["shrouded"].as_array().into_iter().flatten().any(|p| {

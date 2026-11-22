@@ -176,24 +176,27 @@ impl NavigationState {
     /// (`0x004D94C7`), NavCom stored (`0x004D9510`, `0x004D96BC`), and an owed
     /// class-setter call ([`Self::pending_destination_setter`]) settled by the
     /// setter it stood for.
+    #[track_caller]
     pub(crate) fn publish_nav_com(&mut self, nav_com: Option<NavTargetRef>) {
         self.nav_com_aux = None;
-        self.nav_com = nav_com;
+        self.store_nav_com(nav_com);
         self.pending_destination_setter = false;
     }
 
     /// `FootClass::Stop_Moving @ 0x004DF0D0`: NavComAux (`0x004DF0D2`) and
     /// NavCom (`0x004DF0D8`) cleared.
+    #[track_caller]
     pub(crate) fn stop_moving(&mut self) {
         self.nav_com_aux = None;
-        self.nav_com = None;
+        self.store_nav_com(None);
     }
 
     /// `FootClass::PointerExpired`'s NavCom arm: NavComAux (`0x004D9ABD`) and
     /// NavCom (`0x004D9AC3`) cleared when NavCom is the expiring object.
+    #[track_caller]
     pub(crate) fn expire_nav_com(&mut self) {
         self.nav_com_aux = None;
-        self.nav_com = None;
+        self.store_nav_com(None);
     }
 
     /// The destination prologue's NavComAux clear (vt+0x47C, `0x004D94A4`),
@@ -213,7 +216,13 @@ impl NavigationState {
     /// locomotor's Move_To (Jumpjet's reached cell `0x0054B44B`, Teleport's
     /// NULL when it refuses `0x00718213`) and UnitClass::PerCellProcess's dock
     /// restore (`0x0073A4E9`).
+    #[track_caller]
     pub(crate) fn store_nav_com(&mut self, nav_com: Option<NavTargetRef>) {
+        if nav_com.is_none()
+            && let Some(previous) = self.nav_com
+        {
+            log::trace!(target: "vera20k::path", "NavCom cleared previous={previous:?} caller={}", std::panic::Location::caller());
+        }
         self.nav_com = nav_com;
     }
 
@@ -815,12 +824,22 @@ pub(crate) fn set_destination_internal_coord(
 /// system link (`0x004D954B`). The Foot+0x6AC skip (4D9607) stops after this,
 /// and a Teleport owner's Move_To is dispatched by the Unit setter.
 pub(crate) fn publish_nav_com(entity: &mut GameEntity, target: NavTargetRef) {
+    log::trace!(
+        target: "vera20k::path",
+        "Set_Destination unit={} cell={:?} NavCom={:?} -> {target:?}",
+        entity.stable_id(), (entity.position.rx(), entity.position.ry()), entity.navigation.nav_com(),
+    );
     entity.navigation.publish_nav_com(Some(target));
     entity.release_fire_particle_system();
 }
 
 /// Foot4D94C7/4D9510 NULL reference publication, before locomotor Stop.
 pub(super) fn publish_null_nav_com(entity: &mut GameEntity) {
+    log::trace!(
+        target: "vera20k::path",
+        "Set_Destination 0x4D9510 unit={} cell={:?} clearing NavCom={:?}",
+        entity.stable_id(), (entity.position.rx(), entity.position.ry()), entity.navigation.nav_com(),
+    );
     entity.navigation.publish_nav_com(None);
 }
 
