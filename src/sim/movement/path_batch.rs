@@ -649,11 +649,11 @@ impl Simulation {
         {
             return false;
         }
-        let request = match (request, batch.left_out_code2.get(&id)) {
-            (WaitingRequest::Code2Ladder { .. }, Some(&urgency)) => {
-                WaitingRequest::Code2Ladder { urgency }
-            }
-            (WaitingRequest::NoQueue, _) => batch
+        let request = match request {
+            WaitingRequest::Code2Ladder { urgency } => WaitingRequest::Code2Ladder {
+                urgency: batch.left_out_code2.get(&id).copied().unwrap_or(urgency),
+            },
+            WaitingRequest::NoQueue => batch
                 .left_out_recursions
                 .get(&id)
                 .copied()
@@ -746,25 +746,28 @@ impl Simulation {
         batch.ready.clear();
         #[cfg(any(test, feature = "test-support"))]
         batch.answered.clear();
-        let pending = std::mem::take(&mut batch.pending);
         // Last pass's left-outs went into this frame's registrations.
         batch.left_out_code2.clear();
         batch.left_out_recursions.clear();
+        let pending = &mut batch.pending;
         if pending.is_empty() {
             batch.stats.finish(started.elapsed(), 0, 0, 0, 0, [0; 2]);
             return;
         }
-        // A Foot's latest registration this frame stands: its latest state
-        // makes the request it repeats.
-        let pending: Vec<(u64, WaitingRequest)> = pending
-            .into_iter()
-            .collect::<BTreeMap<_, _>>()
-            .into_iter()
-            .collect();
+        // A stable sort keeps repeated requests in issue order. Keep the
+        // latest for each Foot and retain the queue allocation for next frame.
+        pending.sort_by_key(|entry| entry.0);
+        pending.dedup_by(|later, earlier| {
+            if later.0 != earlier.0 {
+                return false;
+            }
+            earlier.1 = later.1;
+            true
+        });
         let waiting = pending.len();
         let mut repath_turns: [Vec<(u64, WaitingRequest)>; 2] = Default::default();
         let mut others = Vec::new();
-        for entry in pending {
+        for entry in pending.drain(..) {
             match entry.1.repath_turn() {
                 Some(turn) => repath_turns[turn].push(entry),
                 None => others.push(entry),
