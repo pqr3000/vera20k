@@ -255,7 +255,7 @@ fn structural_drop_in_owns_order_footprints_and_restore_without_teardown_side_ef
     assert_eq!(
         *sim.smudge_grid.as_ref().unwrap().cell(3, 4),
         decal,
-        "relayer is not a building placement"
+        "an unregistered smudge type survives the building placement scan"
     );
 
     assert!(

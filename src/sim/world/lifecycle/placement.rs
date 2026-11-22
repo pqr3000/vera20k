@@ -139,9 +139,22 @@ impl Simulation {
                     .occupancy
                     .add(rx, ry, stable_id, layer, None, insertion);
                 self.discover_by_player(stable_id, Some((rx, ry)), context.reborrow());
+                self.substrate
+                    .raw_cell_occupation
+                    .mark_ground(rx, ry, BUILDING_OCCUPATION_BIT);
+                self.recalculate_placement_cell(
+                    (rx, ry),
+                    context.rules(),
+                    context.registry(),
+                    true,
+                );
             }
             #[cfg(any(test, feature = "test-support"))]
             self.trace_lifecycle_for_test(LifecycleTestEvent::RawOccupationListLinked);
+            #[cfg(any(test, feature = "test-support"))]
+            if !cells.is_empty() {
+                self.trace_lifecycle_for_test(LifecycleTestEvent::RawOccupationMarked);
+            }
             if layer == crate::sim::movement::locomotor::MovementLayer::Ground
                 && hidden_profile.is_some_and(|profile| {
                     self.substrate.hidden_occupation.enter_building(
@@ -159,22 +172,9 @@ impl Simulation {
                 #[cfg(any(test, feature = "test-support"))]
                 self.trace_lifecycle_for_test(LifecycleTestEvent::HiddenOccupationEntered);
             }
-            for &(rx, ry) in &cells {
-                self.substrate
-                    .raw_cell_occupation
-                    .mark_ground(rx, ry, BUILDING_OCCUPATION_BIT);
-            }
-            #[cfg(any(test, feature = "test-support"))]
-            if !cells.is_empty() {
-                self.trace_lifecycle_for_test(LifecycleTestEvent::RawOccupationMarked);
-            }
         }
         #[cfg(any(test, feature = "test-support"))]
         self.trace_lifecycle_for_test(LifecycleTestEvent::CellMarked);
-        // Building Mark43F180 -> PlaceDown5683C0 publishes AddContent and
-        // Cell Recalc47D2B0 before returning. Keep the derived path view at
-        // that boundary too; the marked structures remain its authority.
-        self.publish_recalculated_cells(context.rules(), &cells);
         // BuildingMark43F738 moves its retained animations after PlaceDown
         // publishes the cells, before43F79B begins the smudge-clear scan.
         self.reposition_building_anim_slots(stable_id, context.rules());
@@ -528,9 +528,22 @@ impl Simulation {
                 self.substrate
                     .occupancy
                     .remove_on_layer(rx, ry, stable_id, layer);
+                self.substrate
+                    .raw_cell_occupation
+                    .clear_ground(rx, ry, BUILDING_OCCUPATION_BIT);
+                self.recalculate_placement_cell(
+                    (rx, ry),
+                    context.rules(),
+                    context.registry(),
+                    true,
+                );
             }
             #[cfg(any(test, feature = "test-support"))]
             self.trace_lifecycle_for_test(LifecycleTestEvent::RawOccupationListUnlinked);
+            #[cfg(any(test, feature = "test-support"))]
+            if !cells.is_empty() {
+                self.trace_lifecycle_for_test(LifecycleTestEvent::RawOccupationCleared);
+            }
             if layer == crate::sim::movement::locomotor::MovementLayer::Ground
                 && hidden_profile.is_some_and(|profile| {
                     self.substrate.hidden_occupation.exit_building(
@@ -546,44 +559,18 @@ impl Simulation {
                 #[cfg(any(test, feature = "test-support"))]
                 self.trace_lifecycle_for_test(LifecycleTestEvent::HiddenOccupationExited);
             }
-            for &(rx, ry) in &cells {
-                self.substrate
-                    .raw_cell_occupation
-                    .clear_ground(rx, ry, BUILDING_OCCUPATION_BIT);
-            }
-            #[cfg(any(test, feature = "test-support"))]
-            if !cells.is_empty() {
-                self.trace_lifecycle_for_test(LifecycleTestEvent::RawOccupationCleared);
-            }
         }
-        // Building Mark43F180 -> PlaceUp5687F0 unlinks each Cell47EA90,
-        // clears occupation453DC0 and recalculates47D2B0 before Conceal
-        // resumes at5F4D73. Fatal Bullet receivers can remove Logic here,
-        // so no later object/frame visit may be required to release the path.
-        // Executed shared death path: tools/spatial_oracle/
-        // building_death_anims_joined_stock_smudges.json (building_mark).
-        // This projects current marked owners, retaining overlapping or
-        // still-marked dying structures; it adds no RNG/timer/detach work.
-        self.publish_recalculated_cells(context.rules(), &cells);
         true
     }
 
-    /// ObjectClass::DropAsBomb5F4160: latch the fall before removing the
-    /// old layer, clear OnBridge, then re-enter the ground list. Location,
-    /// FallRate, parachute byte and locomotor order remain authoritative.
-    /// Native multi-cell content hooks differ from full teardown Mark:
-    /// neither building smudges nor unrelated track reservations are retired.
-    /// Residual: hidden-building content callbacks beyond this relayer.
+    /// ObjectClass::DropAsBomb5F4160 latches the fall, calls the object's
+    /// Mark(UP) at 5F4178, clears OnBridge and calls Mark(DOWN) at 5F41A1.
+    /// BlowUpBridge47DDC9 dispatches this on every member of the deck list.
     pub(crate) fn drop_as_bomb(&mut self, stable_id: u64, mut context: UninitContext<'_>) {
         let rules = context.rules;
-        use crate::sim::movement::locomotor::MovementLayer;
         let Some(entity) = self.substrate.entities.get(stable_id) else {
             return;
         };
-        let cells = entity_occupancy_cells(entity);
-        let sub_cell = entity.sub_cell();
-        let insertion = CellListInsertion::from_category(entity.category());
-        let old_layer = cell_list_layer_for_entity(entity, self.resolved_terrain.as_ref());
         let world_z = crate::sim::movement::ground_pose::object_world_z_leptons(
             entity,
             self.resolved_terrain.as_ref(),
@@ -593,28 +580,7 @@ impl Simulation {
             .get_mut(stable_id)
             .unwrap()
             .begin_bomb_fall();
-        let foot = self
-            .substrate
-            .entities
-            .get(stable_id)
-            .is_some_and(|entity| {
-                matches!(
-                    entity.category(),
-                    EntityCategory::Unit | EntityCategory::Infantry | EntityCategory::Aircraft
-                )
-            });
-        if foot {
-            self.foot_mark_remove(stable_id, rules, context.registry(), &mut context.effects);
-        } else {
-            for &(rx, ry) in &cells {
-                self.substrate.occupancy.remove_on_layer(
-                    rx,
-                    ry,
-                    stable_id,
-                    old_layer.unwrap_or(MovementLayer::Ground),
-                );
-            }
-        }
+        self.unmark_entity_remove(stable_id, context.reborrow());
         self.substrate.display.remove(stable_id);
         let entity = self
             .substrate
@@ -631,20 +597,7 @@ impl Simulation {
             rules,
             None,
         );
-        if foot {
-            self.foot_mark_put(stable_id, rules, context.registry(), &mut context.effects);
-        } else {
-            for &(rx, ry) in &cells {
-                self.substrate.occupancy.add(
-                    rx,
-                    ry,
-                    stable_id,
-                    MovementLayer::Ground,
-                    sub_cell,
-                    insertion,
-                );
-            }
-        }
+        self.mark_entity_put(stable_id, context.reborrow());
         //5F41D0..5F4218: Foot's active Is_Moving chooses the shared
         // locomotor occupation release or the owner's raw Location receiver.
         if let Some(entity) = self.substrate.entities.get(stable_id)
