@@ -668,26 +668,32 @@ impl Simulation {
             }
         }
 
+        let bounds = self.playfield_bounds();
         if let Some(saved_land) = saved_land {
             let terrain = self
                 .resolved_terrain
                 .as_mut()
                 .expect("validated terrain cache");
-            // A custom continuation restores its exact saved hierarchy along
-            // with the matching base rows. Stock player loads rebuild it.
-            if !retain_continuation && let Some(zones) = self.zone_grid.as_mut() {
+            let records = self
+                .bridge_state
+                .as_ref()
+                .map_or(&[][..], |state| state.endpoint_records());
+            let mut player_zones = self.zone_grid.as_mut().filter(|_| !retain_continuation);
+            // An exact continuation keeps its retained base rows and hierarchy.
+            if let Some(zones) = player_zones.as_deref_mut() {
                 zones.recover_zeroed_player_terrain(
                     terrain,
                     &saved_land,
                     &self.dynamic_terrain_cells,
-                    self.bridge_state
-                        .as_ref()
-                        .map_or(&[], |state| state.endpoint_records()),
+                    records,
                 );
             }
             terrain
                 .restore_user_loaded_land(&saved_land)
                 .map_err(|error| SnapshotRestoreError::InvalidSavedCellLand(error.to_string()))?;
+            if let Some(zones) = player_zones {
+                zones.recover_disconnected_player_bridges(terrain, records, bounds);
+            }
         }
 
         // Ares 3.0 10014B70 (hook 0x483D94): a powered firestorm section's

@@ -253,6 +253,15 @@ impl<'de> serde::Deserialize<'de> for ZoneGrid {
                     "saved navigation plane dimensions differ",
                 ));
             }
+            if base
+                .movement_classes
+                .iter()
+                .any(|&class| usize::from(class) >= super::passability::TERRAIN_TYPE_COUNT)
+            {
+                return Err(serde::de::Error::custom(
+                    "saved navigation has an invalid movement class",
+                ));
+            }
             let labels = base.raw_zone_ids_by_row[0].len();
             if labels == 0
                 || base
@@ -389,6 +398,50 @@ impl ZoneGrid {
         )?;
         self.replace_hierarchy(hierarchy);
         Ok(())
+    }
+
+    /// Recover player saves written by VERA while a repaired bridge's active
+    /// record had reached the redirect but not the base zones. Native
+    /// ValidateBridgeZones (0x56DB70) requests RebuildZoneConnectivity
+    /// (0x56C510) when the Normal endpoints still disagree (0x56D100).
+    pub(crate) fn recover_disconnected_player_bridges(
+        &mut self,
+        terrain: &ResolvedTerrainGrid,
+        records: &[crate::sim::bridge_state::BridgeEndpointRecord],
+        bounds: Option<crate::map::playfield::PlayfieldBounds>,
+    ) {
+        use crate::sim::cell_rect::cell_is_in_playfield_height_aware_in_query;
+
+        let cells = crate::map::resolved_terrain::NativeCellQuery::isolated(terrain);
+        let invalid = raw_zone_invalid(crate::map::cell_index::CellGrid::for_extent(
+            self.width,
+            self.height,
+        ));
+        let playable_zone = |(x, y): (u16, u16)| {
+            let coord = (i32::from(x as i16), i32::from(y as i16));
+            if !cell_is_in_playfield_height_aware_in_query(
+                coord,
+                bounds,
+                Some(terrain),
+                Some(&cells),
+            ) {
+                return None;
+            }
+            self.get_zone_id_nonbridge_native(coord, MovementZone::Normal)
+                .filter(|&zone| (2..invalid).contains(&zone))
+        };
+        if records
+            .iter()
+            .filter(|record| record.active && record.is_high())
+            .any(|record| {
+                matches!(
+                    (playable_zone(record.endpoint_a), playable_zone(record.endpoint_b)),
+                    (Some(a), Some(b)) if a != b
+                )
+            })
+        {
+            self.rebuild_retained_base(terrain.terrain_deformation(), records);
+        }
     }
 
     /// Original LoadContent67E8CD ->581F50 rebuilds levels2,1,0 from the

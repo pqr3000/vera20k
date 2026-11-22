@@ -1146,3 +1146,36 @@ fn a_rebuild_after_an_unchanged_one_still_follows_a_class_write() {
     assert_eq!(after, snapshot(&once));
     assert_ne!(after.0, first.0, "the rock cell changed the base zones");
 }
+
+#[test]
+fn bridge_record_repair_rebuilds_unchanged_bank_cells() {
+    let terrain = terrain_from_zone_classes(5, 1, &[0, 7, 7, 7, 0], &[0; 5]);
+    let path = PathGrid::from_resolved_terrain(&terrain);
+    let records = [BridgeEndpointRecord {
+        endpoint_a: (0, 0),
+        endpoint_b: (4, 0),
+        active: false,
+        bridge_kind: BridgeRecordKind::High,
+    }];
+    let mut zones = ZoneGrid::build_with_terrain(&path, &terrain, &records, 5, 1);
+    let reaches = |zones: &ZoneGrid| {
+        zones.can_reach(
+            MovementZone::Normal,
+            records[0].endpoint_a,
+            MovementLayer::Ground,
+            records[0].endpoint_b,
+            MovementLayer::Ground,
+        )
+    };
+
+    zones.rebuild_base_connectivity_preserving_hierarchy(&path, &terrain, &records);
+    assert!(!reaches(&zones));
+    let mut repaired = records;
+    repaired[0].active = true;
+    zones.retain_repaired_bridge_records(&path, &terrain, &repaired);
+    zones.rebuild_base_connectivity_preserving_hierarchy(&path, &terrain, &repaired);
+    assert!(reaches(&zones));
+
+    zones.rebuild_base_connectivity_preserving_hierarchy(&path, &terrain, &records);
+    assert!(!reaches(&zones));
+}

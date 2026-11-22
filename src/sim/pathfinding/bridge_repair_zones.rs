@@ -117,6 +117,11 @@ impl ZoneGrid {
         records: &[BridgeEndpointRecord],
     ) {
         self.invalidate_navigation_history();
+        // 56DB70 changes the active record before requesting 56C510.
+        // The old base rebuild did not consume the new edge.
+        if self.bridge_records != records {
+            self.rebuilt_unchanged = None;
+        }
         // Compatibility readers retain a derived redirect per movement row.
         // Activation changes structural-cell lookup from the broken span's
         // chosen endpoint to A even when56DB70 requests no connectivity pass.

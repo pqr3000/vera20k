@@ -865,3 +865,69 @@ fn structure_mark_publishes_presence_and_preserves_other_marked_blockers() {
         "the published structure-cell cache follows the same Mark authority"
     );
 }
+
+#[test]
+fn player_load_reconnects_only_the_active_bridge_with_stale_base_rows() {
+    use crate::map::playfield::PlayfieldBounds;
+    use crate::map::resolved_terrain::zone_class;
+    use crate::rules::locomotor_type::MovementZone;
+    use crate::sim::bridge_state::{BridgeEndpointRecord, BridgeRecordKind, BridgeRuntimeState};
+
+    let (rules, overlays) = rules_and_overlays();
+    let bounds = PlayfieldBounds::from_raw_local_size(16, 16, [0, 0, 16, 16]);
+    let mut terrain = gsi_04_10_clear_terrain(32, 32);
+    for cell in terrain.cells_mut_for_test() {
+        if cell.rx == 16 || cell.rx == 21 {
+            cell.zone_type = zone_class::IMPASSABLE;
+        }
+    }
+    let mut sim = Simulation::with_seed(47);
+    sim.set_playfield_bounds_for_test(Some(bounds));
+    sim.set_playfield_size_height_for_test(Some(16));
+    sim.install_resolved_terrain_for_new_map(terrain.clone());
+    sim.overlay_grid = Some(OverlayGrid::new(32, 32));
+    let mut bridges =
+        BridgeRuntimeState::from_resolved_terrain_with_map_size(&terrain, true, 300, (16, 16));
+    let mut records = vec![
+        BridgeEndpointRecord {
+            endpoint_a: (14, 14),
+            endpoint_b: (18, 14),
+            active: false,
+            bridge_kind: BridgeRecordKind::High,
+        },
+        BridgeEndpointRecord {
+            endpoint_a: (19, 16),
+            endpoint_b: (23, 16),
+            active: false,
+            bridge_kind: BridgeRecordKind::High,
+        },
+    ];
+    bridges.test_set_endpoint_records(records.clone());
+    sim.bridge_state = Some(bridges);
+    assert!(sim.rebuild_dynamic_navigation(&rules));
+    let zone = |sim: &Simulation, (x, y): (u16, u16)| {
+        sim.zone_grid()
+            .unwrap()
+            .get_zone_id_nonbridge_native((x.into(), y.into()), MovementZone::Normal)
+            .unwrap()
+    };
+    assert_ne!(
+        zone(&sim, records[0].endpoint_a),
+        zone(&sim, records[0].endpoint_b)
+    );
+    records[0].active = true;
+    sim.bridge_state
+        .as_mut()
+        .unwrap()
+        .test_set_endpoint_records(records.clone());
+
+    let loaded = reload_player_map(&sim, &terrain, &rules, &overlays);
+    assert_eq!(
+        zone(&loaded, records[0].endpoint_a),
+        zone(&loaded, records[0].endpoint_b)
+    );
+    assert_ne!(
+        zone(&loaded, records[1].endpoint_a),
+        zone(&loaded, records[1].endpoint_b)
+    );
+}
