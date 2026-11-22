@@ -482,7 +482,10 @@ fn gsi_04_06_simulation_detects_class_only_change_with_identical_pathgrid() {
 
     sim.resolved_terrain.as_mut().unwrap().cells_mut_for_test()[0].zone_type =
         zone_class::CRUSHABLE;
-    sim.rebuild_zone_grid(&path_grid);
+    sim.rebuild_dynamic_navigation_after_recalc(
+        crate::rules::ruleset::RuleSet::empty_for_test(),
+        [(0, 0)],
+    );
 
     let zones = sim.zone_grid.as_ref().unwrap();
     assert_eq!(

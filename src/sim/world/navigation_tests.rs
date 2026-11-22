@@ -11,6 +11,74 @@ use crate::sim::snapshot::GameSnapshot;
 use crate::sim::world::{Simulation, TickLane};
 
 #[test]
+fn dynamic_rebuild_keeps_saved_water_zones_after_player_load() {
+    use crate::map::resolved_terrain::zone_class;
+    use crate::rules::locomotor_type::MovementZone;
+
+    let (rules, overlays) = rules_and_overlays();
+    let terrain = super::water_terrain(16, 16);
+    let mut sim = Simulation::with_seed(47);
+    sim.install_resolved_terrain_for_new_map(terrain.clone());
+    sim.overlay_grid = Some(OverlayGrid::new(16, 16));
+    assert!(sim.rebuild_dynamic_navigation(&rules));
+    let saved_land = terrain
+        .capture_user_saved_template(sim.resolved_terrain().unwrap())
+        .unwrap()
+        .user_load_land_values()
+        .unwrap();
+    let bytes = GameSnapshot::save(&sim, 0, 0, "water.map", 0);
+    let mut loaded = GameSnapshot::load(&bytes).unwrap().sim;
+    loaded.restore_after_snapshot_load().unwrap();
+    loaded.rebuild_caches_after_load(terrain, Default::default(), &rules);
+    loaded
+        .restore_map_authority_after_user_load(&rules, &overlays, None, saved_land)
+        .unwrap();
+    let water_zone = |world: &Simulation| {
+        world
+            .zone_grid()
+            .unwrap()
+            .get_zone_id_nonbridge_native((7, 6), MovementZone::Water)
+    };
+    assert_eq!(water_zone(&loaded), Some(2));
+    assert_eq!(
+        loaded
+            .resolved_terrain()
+            .unwrap()
+            .cell(7, 6)
+            .unwrap()
+            .zone_type,
+        zone_class::GROUND
+    );
+    assert!(loaded.rebuild_dynamic_navigation(&rules));
+    assert_eq!(water_zone(&loaded), Some(2));
+
+    let mut yard = crate::sim::game_entity::GameEntity::test_default_of_category(
+        9,
+        "YARD",
+        "Americans",
+        7,
+        6,
+        EntityCategory::Structure,
+    );
+    yard.set_type_ref_for_test(loaded.interner.intern("YARD"));
+    yard.lifecycle.set_cell_marked_for_test(true);
+    loaded.substrate.entities.insert(yard);
+    assert!(
+        loaded
+            .finalize_frame_overlays_and_navigation(&rules, Some(&overlays), false, true)
+            .is_empty()
+    );
+    // Refreshing a footprint changes path occupation. A later full rebuild
+    // still reads water from the retained Map+68 record under the structure.
+    loaded.rebuild_zone_grid_full(loaded.path_grid_snapshot().unwrap());
+    assert_eq!(water_zone(&loaded), Some(2));
+
+    loaded.install_resolved_terrain_for_new_map(gsi_04_10_clear_terrain(16, 16));
+    assert!(loaded.rebuild_dynamic_navigation(&rules));
+    assert_eq!(water_zone(&loaded), Some(1));
+}
+
+#[test]
 fn native_bridge_record_geometry_changes_rebuild_and_restore_navigation() {
     use crate::map::resolved_terrain::zone_class;
     use crate::rules::locomotor_type::MovementZone;

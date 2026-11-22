@@ -351,6 +351,18 @@ impl ZoneGrid {
             self.width,
             self.height,
         );
+        self.rebuild_hierarchy(terrain, records, bounds);
+        self.bridge_records = records.to_vec();
+        self.pending_native_load = false;
+        Ok(())
+    }
+
+    fn rebuild_hierarchy(
+        &mut self,
+        terrain: &ResolvedTerrainGrid,
+        records: &[crate::sim::bridge_state::BridgeEndpointRecord],
+        bounds: Option<crate::map::playfield::PlayfieldBounds>,
+    ) {
         self.hierarchy = zone_build::hierarchy::build_zone_hierarchy_with_query(
             &self.base_topology,
             Some(terrain),
@@ -365,9 +377,6 @@ impl ZoneGrid {
                 )
             },
         );
-        self.bridge_records = records.to_vec();
-        self.pending_native_load = false;
-        Ok(())
     }
 
     /// Read-only contribution of the retained native navigation state.
@@ -977,6 +986,7 @@ impl ZoneGrid {
         Ok((0, 0))
     }
 
+    #[cfg(test)]
     pub(crate) fn movement_classes_match(&self, terrain: &ResolvedTerrainGrid) -> bool {
         let base = &self.base_topology;
         base.movement_classes.len() == self.width as usize * self.height as usize
@@ -1035,6 +1045,22 @@ impl ZoneGrid {
         *slot = class;
         base.levels[index] = level;
         true
+    }
+
+    /// Publish only cells that ran RecalcAttributes (0x47D551..0x47D571).
+    /// CellLoad (0x483A21) clears the separate live class on untouched cells.
+    pub(crate) fn publish_recalculated_base_cells(
+        &mut self,
+        terrain: &ResolvedTerrainGrid,
+        cells: impl IntoIterator<Item = (u16, u16)>,
+    ) -> bool {
+        let mut changed = false;
+        for (x, y) in cells {
+            if !self.base_cell_attributes_current(terrain, x, y) {
+                changed |= self.refresh_base_cell_attributes_at(terrain, x, y);
+            }
+        }
+        changed
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1120,6 +1146,24 @@ impl ZoneGrid {
     pub(crate) fn replace_hierarchy(&mut self, hierarchy: ZoneHierarchy) {
         self.invalidate_navigation_history();
         self.hierarchy = hierarchy;
+    }
+
+    /// 0x56C5AC clears only the cluster word in each Map+68 record. 0x56CB90
+    /// floods the retained class and height. 0x581F50 then rebuilds all levels.
+    pub(crate) fn rebuild_connectivity_and_hierarchy(
+        &mut self,
+        path: &PathGrid,
+        terrain: &ResolvedTerrainGrid,
+        records: &[crate::sim::bridge_state::BridgeEndpointRecord],
+        source_size: Option<(i32, i32)>,
+        bounds: Option<crate::map::playfield::PlayfieldBounds>,
+    ) {
+        if self.native_bridge_source_size != source_size {
+            self.native_bridge_source_size = source_size;
+            self.rebuilt_unchanged = None;
+        }
+        self.rebuild_base_connectivity_preserving_hierarchy(path, terrain, records);
+        self.rebuild_hierarchy(terrain, records, bounds);
     }
 
     /// Rebuild the products owned by the base connectivity pass while retaining
