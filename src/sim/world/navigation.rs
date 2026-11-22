@@ -158,6 +158,7 @@ impl NavigationCaches<'_> {
         interner: &StringInterner,
         rules: &RuleSet,
         recalculated: impl IntoIterator<Item = (u16, u16)>,
+        full_connectivity: bool,
     ) -> Result<BTreeSet<(u16, u16)>, String> {
         let mut grid = PathGrid::from_resolved_terrain_with_bridges(terrain, self.overlays);
 
@@ -182,6 +183,7 @@ impl NavigationCaches<'_> {
             .zones
             .as_mut()
             .is_some_and(|zones| zones.publish_recalculated_base_cells(terrain, recalculated))
+            || full_connectivity
         {
             self.rebuild_zones_full(Arc::new(grid), terrain, bridges);
         } else {

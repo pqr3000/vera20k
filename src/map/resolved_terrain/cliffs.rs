@@ -64,6 +64,14 @@ pub(crate) struct DestroyableCliffMutation {
     pub original_footprint: Vec<(u16, u16)>,
     pub animation_cells: Vec<(i16, i16)>,
     pub changed_cells: Vec<(u16, u16)>,
+    /// Stamped coordinate and its pristine replacement TMP/subtile, in write order.
+    replacement_stamps: Vec<((u16, u16), usize, usize)>,
+}
+
+impl DestroyableCliffMutation {
+    pub(crate) fn stamped_cells(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.replacement_stamps.iter().map(|&(coord, _, _)| coord)
+    }
 }
 
 impl ResolvedTerrainGrid {
@@ -173,7 +181,7 @@ impl ResolvedTerrainGrid {
     /// gamemd-derived: `MapClass::CollapseDestroyableCliff @ 0x00581140`
     /// terrain half. The world owner surrounds this with zones, detach/dirty,
     /// and AnimClass construction so all non-grid authorities remain ordered.
-    pub(crate) fn collapse_destroyable_cliff_terrain(
+    pub(crate) fn stamp_destroyable_cliff_terrain(
         &mut self,
         rx: u16,
         ry: u16,
@@ -252,6 +260,7 @@ impl ResolvedTerrainGrid {
             DestroyableCliffFamily::B => [(3, origin), (2, (origin.0, origin.1.wrapping_add(3)))],
         };
         let mut changed_cells = Vec::new();
+        let mut replacement_stamps = Vec::new();
         for (template_index, anchor) in stamps {
             let template = &catalog.replacements[template_index];
             for y in 0..template.height {
@@ -298,26 +307,16 @@ impl ResolvedTerrainGrid {
                         );
                     }
                     recalc_dynamic_tile_attributes(&mut self.cells[cell_index], prototype);
+                    if let Some(rock) = cliff_back_rock {
+                        self.reclass_cell_behind_cliff(cell_index, rock);
+                    }
+                    replacement_stamps.push(((x, y), template_index, index));
                     self.radar_color_valid[cell_index] = true;
                     self.damaged_radar_metadata[cell_index] = None;
                     if !changed_cells.contains(&(x, y)) {
                         changed_cells.push((x, y));
                     }
                 }
-            }
-        }
-
-        // Family A 0x0058137B, family B 0x00581A7A: RecalcAttributes once
-        // more over the old footprint, every Level now final. The retail
-        // stamps cover that footprint exactly, and the one answer the stamps'
-        // own Recalc could have got wrong is the CliffBack neighbour test.
-        // Residual: that Recalc reads the six neighbours for any non-zero
-        // CliffBack byte, on any land (`0x0047DB59..0x0047DB66`); this reads
-        // them only for byte 2, on land the write can take.
-        if let Some(rock) = cliff_back_rock {
-            for &(x, y) in &original_footprint {
-                let index = self.index(x, y).expect("validated real cell");
-                self.reclass_cell_behind_cliff(index, rock);
             }
         }
 
@@ -342,7 +341,33 @@ impl ResolvedTerrainGrid {
             original_footprint,
             animation_cells,
             changed_cells,
+            replacement_stamps,
         })
+    }
+
+    /// 58137B/581A7A: the old footprint's Recalc follows 56C510. Each cell
+    /// starts from its replacement's pristine land before testing the now
+    /// final neighbour heights, even if the stamp itself had selected Rock.
+    pub(crate) fn recalc_collapsed_cliff_footprint(
+        &mut self,
+        mutation: &DestroyableCliffMutation,
+        cliff_back_rock: Option<&LandTypeSemantics>,
+    ) {
+        let Some(rock) = cliff_back_rock else { return };
+        for &coord in &mutation.original_footprint {
+            let index = self.index(coord.0, coord.1).expect("validated real cell");
+            if let Some((_, template, sub)) = mutation
+                .replacement_stamps
+                .iter()
+                .rev()
+                .find(|&&(stamped, _, _)| stamped == coord)
+                && let Some(catalog) = &self.destroyable_cliff_catalog
+                && let Some(prototype) = &catalog.replacements[*template].entries[*sub]
+            {
+                recalc_dynamic_tile_attributes(&mut self.cells[index], prototype);
+            }
+            self.reclass_cell_behind_cliff(index, rock);
+        }
     }
 
     /// One cell's runtime LAT and slope fixup

@@ -152,14 +152,16 @@ impl Simulation {
     /// Rebuild dynamic structure blockers, zones, and the canonical PathGrid
     /// as one simulation-owned projection.
     pub fn rebuild_dynamic_navigation(&mut self, rules: &RuleSet) -> bool {
-        self.rebuild_dynamic_navigation_after_recalc(rules, [])
+        self.rebuild_dynamic_navigation_after_recalc(rules, [], false)
     }
 
-    /// Include the actual RecalcAttributes publications preceding this rebuild.
+    /// Publish the cells that ran RecalcAttributes. An explicit 56C510 call
+    /// must also consume class or height writes made before this batch.
     pub(crate) fn rebuild_dynamic_navigation_after_recalc(
         &mut self,
         rules: &RuleSet,
         recalculated: impl IntoIterator<Item = (u16, u16)>,
+        full_connectivity: bool,
     ) -> bool {
         let Some(terrain) = self.resolved_terrain.as_ref() else {
             return false;
@@ -182,6 +184,7 @@ impl Simulation {
             &self.interner,
             rules,
             overlay_cells.into_iter().chain(recalculated),
+            full_connectivity,
         );
         match result {
             Ok(cells) => self.structure_navigation_cells = cells,
@@ -274,7 +277,7 @@ impl Simulation {
         }
 
         if navigation_rebuild_requested {
-            let _ = self.rebuild_dynamic_navigation_after_recalc(rules, navigation_cells);
+            let _ = self.rebuild_dynamic_navigation_after_recalc(rules, navigation_cells, false);
         } else {
             if structures_changed {
                 self.publish_structure_navigation(rules);
