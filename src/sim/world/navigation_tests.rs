@@ -32,6 +32,117 @@ fn reload_player_map(
     loaded
 }
 
+fn reload_player_map_with_ground_rock(clear_boundary: bool) -> Simulation {
+    use crate::map::playfield::{PlayfieldBounds, size_diamond_contains};
+    use crate::map::resolved_terrain::zone_class;
+    use crate::rules::terrain_rules::LandType;
+    use crate::sim::bridge_state::BridgeRuntimeState;
+
+    let ini = IniFile::from_str(
+        "[Clear]\nFoot=100%\nWheel=100%\n[Rock]\nFoot=0%\nWheel=0%\n\
+         [OverlayTypes]\n0=TESTWALL\n[TESTWALL]\nWall=yes\n",
+    );
+    let rules = RuleSet::from_ini_with_fixed_art_for_test(&ini, &IniFile::from_str("")).unwrap();
+    let bounds = PlayfieldBounds::from_raw_local_size(16, 16, [0, 0, 16, 16]);
+    let mut terrain = gsi_04_10_clear_terrain(32, 32);
+    let mut allocated = Vec::new();
+    for cell in terrain.cells_mut_for_test() {
+        if size_diamond_contains(16, 16, (cell.rx as i16, cell.ry as i16)) {
+            allocated.push((cell.rx, cell.ry));
+        }
+        cell.outside_playfield = !bounds.contains_geometry_packed(cell.rx.into(), cell.ry.into());
+        if cell.outside_playfield {
+            cell.zone_type = zone_class::OUTSIDE;
+        }
+    }
+    terrain.test_set_native_allocated_cells(&allocated);
+    terrain.set_land_speed_rules_for_test(&rules.terrain_rules);
+    let rock = terrain.cell_mut_for_test(16, 16).unwrap();
+    rock.land_type = LandType::Rock.as_index();
+    rock.base_land_type = rock.land_type;
+    rock.speed_costs = rules.terrain_rules.row(LandType::Rock).speed_costs;
+    rock.base_speed_costs = rock.speed_costs;
+    rock.ground_walk_blocked = true;
+    rock.base_ground_walk_blocked = true;
+    rock.zone_type = zone_class::IMPASSABLE;
+
+    // Build the saved classes and their actual connectivity together, as the
+    // old full rebuild did after Cell Load left the live class bytes at zero.
+    let mut saved = terrain.clone();
+    saved.cell_mut_for_test(16, 16).unwrap().zone_type = zone_class::GROUND;
+    if clear_boundary {
+        for cell in saved.cells_mut_for_test() {
+            if cell.outside_playfield {
+                cell.zone_type = zone_class::GROUND;
+            }
+        }
+    }
+    saved.cell_mut_for_test(15, 15).unwrap().zone_type = zone_class::WALL;
+    saved.cell_mut_for_test(15, 15).unwrap().level = 1;
+    let mut overlays = OverlayGrid::new(32, 32);
+    overlays.place_overlay(15, 15, 0, 0);
+    let mut sim = Simulation::with_seed(47);
+    sim.set_playfield_bounds_for_test(Some(bounds));
+    sim.set_playfield_size_height_for_test(Some(16));
+    sim.bridge_state = Some(BridgeRuntimeState::from_resolved_terrain_with_map_size(
+        &saved,
+        true,
+        300,
+        (16, 16),
+    ));
+    sim.install_resolved_terrain_for_new_map(saved);
+    sim.overlay_grid = Some(overlays);
+    assert!(sim.rebuild_dynamic_navigation(&rules));
+    reload_player_map(&sim, &terrain, &rules, rules.overlay_registry())
+}
+
+#[test]
+fn player_load_repairs_globally_cleared_rock_and_keeps_saved_wall_and_height() {
+    use crate::map::resolved_terrain::zone_class;
+    use crate::rules::locomotor_type::MovementZone::Infantry;
+
+    let mut loaded = reload_player_map_with_ground_rock(true);
+    let zones = loaded.zone_grid.as_mut().unwrap();
+    assert_eq!(
+        zones.base_movement_class_at(16, 16),
+        Some(zone_class::IMPASSABLE)
+    );
+    assert_eq!(
+        zones.get_zone_id_nonbridge_native((16, 16), Infantry),
+        Some(1)
+    );
+    let ground = zones
+        .get_zone_id_nonbridge_native((16, 15), Infantry)
+        .unwrap();
+    assert!(ground > 1 && ground != 0xffff);
+    assert_eq!(
+        zones.get_zone_id_nonbridge_native((17, 15), Infantry),
+        Some(ground)
+    );
+    assert_eq!(zones.base_movement_class_at(15, 15), Some(zone_class::WALL));
+    assert_eq!(zones.base_topology_mut_for_test().levels()[15 * 32 + 15], 1);
+}
+
+#[test]
+fn player_load_keeps_isolated_ground_rock_with_intact_boundaries() {
+    use crate::map::resolved_terrain::zone_class;
+
+    let loaded = reload_player_map_with_ground_rock(false);
+    let zones = loaded.zone_grid().unwrap();
+    assert_eq!(
+        zones.base_movement_class_at(16, 1),
+        Some(zone_class::OUTSIDE)
+    );
+    assert_eq!(
+        zones.base_movement_class_at(1, 16),
+        Some(zone_class::OUTSIDE)
+    );
+    assert_eq!(
+        zones.base_movement_class_at(16, 16),
+        Some(zone_class::GROUND)
+    );
+}
+
 #[test]
 fn dynamic_rebuild_keeps_saved_water_zones_after_player_load() {
     use crate::map::resolved_terrain::zone_class;

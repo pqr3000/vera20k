@@ -668,9 +668,21 @@ impl Simulation {
         }
 
         if let Some(saved_land) = saved_land {
-            self.resolved_terrain
+            let terrain = self
+                .resolved_terrain
                 .as_mut()
-                .expect("validated terrain cache")
+                .expect("validated terrain cache");
+            if let Some(zones) = self.zone_grid.as_mut() {
+                zones.recover_zeroed_player_terrain(
+                    terrain,
+                    &saved_land,
+                    &self.dynamic_terrain_cells,
+                    self.bridge_state
+                        .as_ref()
+                        .map_or(&[], |state| state.endpoint_records()),
+                );
+            }
+            terrain
                 .restore_user_loaded_land(&saved_land)
                 .map_err(|error| SnapshotRestoreError::InvalidSavedCellLand(error.to_string()))?;
         }
