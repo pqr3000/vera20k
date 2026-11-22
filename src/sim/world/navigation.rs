@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::map::entities::EntityCategory;
-use crate::map::resolved_terrain::ResolvedTerrainGrid;
+use crate::map::resolved_terrain::{ResolvedTerrainCell, ResolvedTerrainGrid};
 use crate::rules::ruleset::RuleSet;
 use crate::sim::bridge_state::BridgeRuntimeState;
 use crate::sim::entity_store::EntityStore;
@@ -123,6 +123,15 @@ impl NavigationCaches<'_> {
         {
             zones.refresh_base_cell_attributes_at(terrain, coord.0, coord.1);
         }
+        self.publish_path_cell_with_presence(terrain, cell, structure_blocked)
+    }
+
+    pub(super) fn publish_path_cell_with_presence(
+        &mut self,
+        terrain: &ResolvedTerrainGrid,
+        cell: &ResolvedTerrainCell,
+        structure_blocked: bool,
+    ) -> Result<(), String> {
         if let Some(path) = self.path.as_mut() {
             if path.width() != terrain.width() || path.height() != terrain.height() {
                 return Err("path dimensions differ from terrain".into());
@@ -148,6 +157,7 @@ impl NavigationCaches<'_> {
         entities: &EntityStore,
         interner: &StringInterner,
         rules: &RuleSet,
+        recalculated: impl IntoIterator<Item = (u16, u16)>,
     ) -> Result<BTreeSet<(u16, u16)>, String> {
         let mut grid = PathGrid::from_resolved_terrain_with_bridges(terrain, self.overlays);
 
@@ -168,6 +178,12 @@ impl NavigationCaches<'_> {
                 self.playfield_bounds,
             )?;
             *self.path = Some(Arc::new(grid));
+        } else if self
+            .zones
+            .as_mut()
+            .is_some_and(|zones| zones.publish_recalculated_base_cells(terrain, recalculated))
+        {
+            self.rebuild_zones_full(Arc::new(grid), terrain, bridges);
         } else {
             self.rebuild_zones(Arc::new(grid), terrain, bridges);
         }
@@ -222,17 +238,12 @@ impl NavigationCaches<'_> {
             .ok_or("path cell is outside terrain")?;
         // Cache owners are optional during loading/headless execution. Refresh
         // installed views without inventing a zone rebuild or eager map load.
-        if let Some(path) = self.path.as_mut() {
-            if path.width() != terrain.width() || path.height() != terrain.height() {
-                return Err("path dimensions differ from terrain".into());
-            }
+        if self.path.is_some() {
             let mut structure_blocked = false;
             visit_structure_movement_cells(entities, interner, rules, |marked| {
                 structure_blocked |= marked == coord;
             });
-            if !Arc::make_mut(path).refresh_resolved_cell(cell, self.overlays, structure_blocked) {
-                return Err("current path cell could not be published".into());
-            }
+            self.publish_path_cell_with_presence(terrain, cell, structure_blocked)?;
         }
         Ok(())
     }
@@ -248,25 +259,14 @@ impl NavigationCaches<'_> {
             .map(BridgeRuntimeState::endpoint_records)
             .unwrap_or(&[]);
         let geometry = bridges.and_then(BridgeRuntimeState::native_zone_source_size);
-        if self
-            .zones
-            .as_ref()
-            .is_some_and(|zones| !zones.bridge_inputs_match(records, geometry))
-        {
-            self.rebuild_zones_full(path_grid, terrain, bridges);
-            return;
-        }
-        // Reuse the zones only when nothing changed: a changed batch carries no
-        // Assign-vs-Merge provenance, so it rebuilds in full (exact one-cell
-        // repairs go through `repair_zone_cell` at their mutation owners).
         if let (Some(prev), Some(zones)) = (self.path.as_deref(), self.zones.as_ref())
+            && zones.width() == terrain.width()
+            && zones.height() == terrain.height()
+            && zones.bridge_inputs_match(records, geometry)
             && prev
                 .diff_cells(&path_grid)
                 .is_some_and(|changed| changed.is_empty())
-            && zones.movement_classes_match(terrain)
         {
-            // PathGrid does not carry CellClass reduced zone type.
-            // Both path state and retained base classes must match.
             *self.path = Some(path_grid);
             return;
         }
@@ -281,18 +281,27 @@ impl NavigationCaches<'_> {
         terrain: &ResolvedTerrainGrid,
         bridges: Option<&BridgeRuntimeState>,
     ) {
-        *self.zones = Some(
-            ZoneGrid::build_with_native_map_context(
+        let records = bridges.map_or(&[][..], BridgeRuntimeState::endpoint_records);
+        let source_size = bridges.and_then(BridgeRuntimeState::native_zone_source_size);
+        if let Some(zones) = self.zones.as_mut()
+            && (zones.width(), zones.height()) == (terrain.width(), terrain.height())
+        {
+            zones.rebuild_connectivity_and_hierarchy(
                 &path_grid,
                 terrain,
-                bridges
-                    .map(BridgeRuntimeState::endpoint_records)
-                    .unwrap_or(&[]),
-                bridges.and_then(BridgeRuntimeState::native_zone_source_size),
+                records,
+                source_size,
                 self.playfield_bounds,
-            )
-            .into(),
-        );
+            );
+        } else {
+            *self.zones = Some(ZoneGrid::build_with_native_map_context(
+                &path_grid,
+                terrain,
+                records,
+                source_size,
+                self.playfield_bounds,
+            ));
+        }
         *self.path = Some(path_grid);
     }
 }
