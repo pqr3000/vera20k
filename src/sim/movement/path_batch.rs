@@ -10,8 +10,8 @@
 //! run out. With batching on, either registers the Foot and takes the
 //! timer-still-running branch instead. At the start of the next frame's live
 //! object pass the registrations are searched on worker threads against the
-//! world as it stands, up to a cap (below), and the Foot's request then runs
-//! its Find_Path with the answer.
+//! world as it stands, up to a cap (below). At its own turn the Foot runs
+//! Find_Path and can reuse a successful route from the batch.
 //!
 //! Sim-scale deviation from native order (update order and
 //! same-frame effects), pending side-by-side play: a Foot's path search runs
@@ -29,10 +29,10 @@
 //! visible cases: Infantry Scatter's immediate Process (0x51D478) waits, so
 //! scattered infantry leave a frame later; a Drive/Ship Foot whose track
 //! ends with no path left loses that frame's movement where native's timer
-//! had run out. Through these requests a Foot searches at most once a
-//! frame, and only when the pass answered it: its first request that frame
-//! takes the answer, or searches for itself when none fits, and any other
-//! waits. That includes the requests of a refused cell's recursion (Walk's
+//! had run out. A Foot claims at most one scheduled turn per frame. Its
+//! first request in that turn takes the saved route or searches the live
+//! world if none fits. Any further request waits. That includes the
+//! requests of a refused cell's recursion (Walk's
 //! admission retries, which expire the timer; Drive/Ship's Process_Movement
 //! re-entries, of which the 0x4B4541 tail expires it) and a code-2 re-path
 //! right after a found route, whose timer Find_Path left run out. So a Foot
@@ -63,7 +63,7 @@
 //! new route's first track runs straight.
 //! Hover's own timer-gated Find_Path is not batched.
 //! The batch draws no random numbers; later draws follow the changed
-//! movement. Each search reads only that frame-start world, so no result
+//! movement. Each worker reads the same frame-start world, so no result
 //! depends on the thread count. Simulations start without batching; real
 //! matches and sim-bench turn it on ([`Simulation::batch_path_searches`]).
 //!
@@ -153,6 +153,8 @@
 //! may already have left, and a false NULL from Find_Path would stop the
 //! driver and clear a distant NavCom (0x004D4044, 0x004D4143). A Foot whose
 //! batch found no route uses its scheduled turn to search the live world.
+//! This can run a second bounded search on a permanently blocked path.
+//! The expansion count in [`PathBatchStats`] covers the worker pass.
 //!
 //! The batch searches before Mark0 lifts the Foot off its cell; see
 //! [`MoverLift::Emulated`] for what the search emulates and drops. The

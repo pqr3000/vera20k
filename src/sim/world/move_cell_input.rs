@@ -810,24 +810,29 @@ impl Simulation {
                 // follow both tube records. Issue Move one cell out from the
                 // far mouth, facing away from its own entry direction.
                 let Some(terrain) = self.resolved_terrain.as_ref() else {
+                    log::trace!(target: "vera20k::path", "tunnel click unit={id} clicked={clicked:?} refused: no terrain");
                     return Ok(None);
                 };
                 let cells = NativeCellQuery::isolated(terrain);
                 let Some(tube) = terrain
                     .tube_for_native_cell(cells.lookup((clicked.0 as i16, clicked.1 as i16)))
                 else {
+                    log::trace!(target: "vera20k::path", "tunnel click unit={id} clicked={clicked:?} refused: no entry tube");
                     return Ok(None);
                 };
                 let exit = cells.lookup((tube.exit.0 as i16, tube.exit.1 as i16));
                 let Some(reverse) = terrain.tube_for_native_cell(exit) else {
+                    log::trace!(target: "vera20k::path", "tunnel click unit={id} clicked={clicked:?} refused: no reverse exit tube");
                     return Ok(None);
                 };
                 let direction = (reverse.direction.wrapping_sub(4) & 7) as usize;
                 let (dx, dy) = crate::util::direction::DIRECTION_DELTAS[direction];
-                return Ok(Some((
+                let destination = (
                     tube.exit.0.wrapping_add_signed(dx as i16),
                     tube.exit.1.wrapping_add_signed(dy as i16),
-                )));
+                );
+                log::trace!(target: "vera20k::path", "tunnel click unit={id} clicked={clicked:?} destination={destination:?}");
+                return Ok(Some(destination));
             }
             MoveAction::NoMove => match entity.category() {
                 EntityCategory::Unit => entity.is_fully_deployed(),
@@ -851,6 +856,7 @@ impl Simulation {
         let map = self.click_map()?;
         let terrain = map.cells.terrain();
         let resolved = resolve_foot_cell_click(
+            id,
             &map,
             &FootCellClick {
                 clicked: (clicked.0 as i16, clicked.1 as i16),
@@ -1605,15 +1611,24 @@ fn grounded_coordinate(cells: &NativeCellQuery<'_>, x: i32, y: i32) -> Result<Dr
 /// FNPC's independent burrow argument (`0x004DE3DB..0x004DE3F9`) is set
 /// only for the special NoMove arm when Type+D2C and GetHeight below0.
 fn resolve_foot_cell_click(
+    id: u64,
     map: &ClickMap<'_>,
     click: &FootCellClick,
     open: impl Fn(NativeCellIdentity) -> Result<bool, String>,
 ) -> Result<Option<(u16, u16)>, String> {
     let cells = &map.cells;
+    let refuse = |reason: &str| {
+        log::trace!(
+            target: "vera20k::path",
+            "move click unit={id} clicked={:?} movement={:?} refused: {reason}",
+            click.clicked, click.mover.movement_zone,
+        );
+        None
+    };
     let in_playfield = map.in_playfield(click.clicked);
     let point = clicked_coordinate(cells, click.clicked)?;
     if !click.move_to_shroud && crate::sim::vision::coordinate_is_shrouded(cells, point, &open)? {
-        return Ok(None);
+        return Ok(refuse("MoveToShroud disabled for unexplored cell"));
     }
     let source = map.source(&click.mover);
     let in_air = click.mover.in_air(cells);
@@ -1628,23 +1643,27 @@ fn resolve_foot_cell_click(
     let point = clicked_coordinate(cells, click.clicked)?;
     let shrouded = crate::sim::vision::coordinate_is_shrouded(cells, point, &open)?;
     let unrestricted = special && click.action == 2;
-    let clicked =
-        (click.clicked != (0, 0)).then_some((click.clicked.0 as u16, click.clicked.1 as u16));
-    if !unrestricted && in_playfield && !shrouded {
-        if special || (click.teleporter && click.action != 2) {
-            return Ok(clicked);
-        }
-        if map.reaches(source, source_bridge, click.clicked, movement_zone)? {
-            return Ok(clicked);
-        }
+    if !unrestricted
+        && in_playfield
+        && !shrouded
+        && (special
+            || (click.teleporter && click.action != 2)
+            || map.reaches(source, source_bridge, click.clicked, movement_zone)?)
+    {
+        return Ok(if click.clicked == (0, 0) {
+            refuse("null cell")
+        } else {
+            Some((click.clicked.0 as u16, click.clicked.1 as u16))
+        });
     }
-    map.nearby(
+    let nearby = map.nearby(
         click.clicked,
         click.mover.speed_type,
         movement_zone,
         (!unrestricted).then_some((source, source_bridge)),
         unrestricted && click.mover.requires_burrowable(cells),
-    )
+    )?;
+    Ok(nearby.or_else(|| refuse("no eligible nearby cell")))
 }
 
 /// Values Foot `0x004D74E0`'s Move arm reads once it has an order to send.

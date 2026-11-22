@@ -8,7 +8,7 @@ use crate::sim::world::ConcealOutcome;
 fn a_crossing_opened_before_the_movers_turn_keeps_its_move_order() {
     let rules = rules();
     let goal = (28, 16);
-    for (batched, opens) in [(false, false), (false, true), (true, true)] {
+    for (batched, opens) in [(false, false), (false, true), (true, false), (true, true)] {
         let (mut sim, _) = arena(&rules);
         crate::sim::arena_fixture::flood(
             &mut sim,
