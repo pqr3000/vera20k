@@ -304,7 +304,7 @@ impl Simulation {
     /// RecalcZoneType's building arm for the cell at `(rx, ry)` (its
     /// building, CellClass::GetBuilding): a `Firestorm.Wall` section whose
     /// House's firestorm (HouseClass+0x1FA) is up.
-    fn ares_firestorm_cell_impassable(&self, rx: u16, ry: u16, rules: &RuleSet) -> bool {
+    pub(crate) fn ares_firestorm_cell_impassable(&self, rx: u16, ry: u16, rules: &RuleSet) -> bool {
         self.ares_cell_building(i32::from(rx), i32::from(ry))
             .and_then(|id| self.substrate.entities.get(id))
             .is_some_and(|section| {
