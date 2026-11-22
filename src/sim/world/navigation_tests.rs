@@ -11,19 +11,30 @@ use crate::sim::production::{ProductionCategory, enqueue_by_type};
 use crate::sim::snapshot::GameSnapshot;
 use crate::sim::world::{Simulation, TickLane};
 
-fn reload_player_map(
+fn save_player_map(
     world: &Simulation,
     terrain: &ResolvedTerrainGrid,
-    rules: &RuleSet,
-    overlays: &OverlayTypeRegistry,
-) -> Simulation {
+) -> (
+    GameSnapshot,
+    crate::map::resolved_terrain::SavedCellLandValues,
+) {
     let land = terrain
         .capture_user_saved_template(world.resolved_terrain().unwrap())
         .unwrap()
         .user_load_land_values()
         .unwrap();
     let bytes = GameSnapshot::save(world, 0, 0, "water.map", 0);
-    let mut loaded = GameSnapshot::load(&bytes).unwrap().sim;
+    (GameSnapshot::load(&bytes).unwrap(), land)
+}
+
+fn reload_player_map(
+    world: &Simulation,
+    terrain: &ResolvedTerrainGrid,
+    rules: &RuleSet,
+    overlays: &OverlayTypeRegistry,
+) -> Simulation {
+    let (snapshot, land) = save_player_map(world, terrain);
+    let mut loaded = snapshot.sim;
     loaded.restore_after_snapshot_load().unwrap();
     loaded.rebuild_caches_after_load(terrain.clone(), Default::default(), rules);
     loaded
@@ -32,7 +43,10 @@ fn reload_player_map(
     loaded
 }
 
-fn reload_player_map_with_ground_rock(clear_boundary: bool) -> Simulation {
+fn reload_player_map_with_ground_rock(
+    clear_boundary: bool,
+    policy: Option<crate::rules::rule_policy::RulePolicy>,
+) -> Simulation {
     use crate::map::playfield::{PlayfieldBounds, size_diamond_contains};
     use crate::map::resolved_terrain::zone_class;
     use crate::rules::terrain_rules::LandType;
@@ -82,6 +96,14 @@ fn reload_player_map_with_ground_rock(clear_boundary: bool) -> Simulation {
     let mut overlays = OverlayGrid::new(32, 32);
     overlays.place_overlay(15, 15, 0, 0);
     let mut sim = Simulation::with_seed(47);
+    if let Some(policy) = policy {
+        sim.install_session_admission(
+            crate::sim::scenario_session::ScenarioGameMode::Campaign,
+            None,
+            policy,
+        );
+        assert!(sim.retains_snapshot_continuation());
+    }
     sim.set_playfield_bounds_for_test(Some(bounds));
     sim.set_playfield_size_height_for_test(Some(16));
     sim.bridge_state = Some(BridgeRuntimeState::from_resolved_terrain_with_map_size(
@@ -93,7 +115,20 @@ fn reload_player_map_with_ground_rock(clear_boundary: bool) -> Simulation {
     sim.install_resolved_terrain_for_new_map(saved);
     sim.overlay_grid = Some(overlays);
     assert!(sim.rebuild_dynamic_navigation(&rules));
-    reload_player_map(&sim, &terrain, &rules, rules.overlay_registry())
+    let (snapshot, land) = save_player_map(&sim, &terrain);
+    snapshot
+        .restore_player_world(
+            crate::sim::world::SnapshotProcessState::Live(&sim),
+            &rules,
+            terrain,
+            Default::default(),
+            crate::sim::snapshot::PlayerSaveCells::Saved {
+                land,
+                prepare_assets: &mut |_, _, _| Ok(()),
+            },
+        )
+        .unwrap()
+        .0
 }
 
 #[test]
@@ -101,7 +136,7 @@ fn player_load_repairs_globally_cleared_rock_and_keeps_saved_wall_and_height() {
     use crate::map::resolved_terrain::zone_class;
     use crate::rules::locomotor_type::MovementZone::Infantry;
 
-    let mut loaded = reload_player_map_with_ground_rock(true);
+    let mut loaded = reload_player_map_with_ground_rock(true, None);
     let zones = loaded.zone_grid.as_mut().unwrap();
     assert_eq!(
         zones.base_movement_class_at(16, 16),
@@ -127,7 +162,7 @@ fn player_load_repairs_globally_cleared_rock_and_keeps_saved_wall_and_height() {
 fn player_load_keeps_isolated_ground_rock_with_intact_boundaries() {
     use crate::map::resolved_terrain::zone_class;
 
-    let loaded = reload_player_map_with_ground_rock(false);
+    let loaded = reload_player_map_with_ground_rock(false, None);
     let zones = loaded.zone_grid().unwrap();
     assert_eq!(
         zones.base_movement_class_at(16, 1),
@@ -137,6 +172,20 @@ fn player_load_keeps_isolated_ground_rock_with_intact_boundaries() {
         zones.base_movement_class_at(1, 16),
         Some(zone_class::OUTSIDE)
     );
+    assert_eq!(
+        zones.base_movement_class_at(16, 16),
+        Some(zone_class::GROUND)
+    );
+}
+
+#[test]
+fn player_load_keeps_base_classes_with_their_exact_custom_zone_history() {
+    use crate::map::resolved_terrain::zone_class;
+    use crate::rules::rule_policy::{AllowWinTagsPolicy, RulePolicy};
+
+    let custom = RulePolicy::stock_campaign().with_allow_win_tags(AllowWinTagsPolicy::Ignore);
+    let loaded = reload_player_map_with_ground_rock(true, Some(custom));
+    let zones = loaded.zone_grid().unwrap();
     assert_eq!(
         zones.base_movement_class_at(16, 16),
         Some(zone_class::GROUND)
