@@ -576,6 +576,7 @@ impl Simulation {
             });
         }
 
+        let retain_continuation = self.retains_snapshot_continuation();
         if let Some(saved_land) = saved_land.as_ref() {
             // MouseLoad restores Map+68/raw rows before LoadContent67E8CD's
             // hierarchy pass. A user file cannot invent that saved topology
@@ -588,7 +589,7 @@ impl Simulation {
             if !zones.is_native_load_pending() {
                 return Err(SnapshotRestoreError::NavigationAuthorityPublicationFailed);
             }
-            if !self.retains_snapshot_continuation() {
+            if !retain_continuation {
                 self.reset_crates_after_user_load(saved_land)?;
             }
         }
@@ -668,9 +669,23 @@ impl Simulation {
         }
 
         if let Some(saved_land) = saved_land {
-            self.resolved_terrain
+            let terrain = self
+                .resolved_terrain
                 .as_mut()
-                .expect("validated terrain cache")
+                .expect("validated terrain cache");
+            // A custom continuation restores its exact saved hierarchy along
+            // with the matching base rows. Stock player loads rebuild it.
+            if !retain_continuation && let Some(zones) = self.zone_grid.as_mut() {
+                zones.recover_zeroed_player_terrain(
+                    terrain,
+                    &saved_land,
+                    &self.dynamic_terrain_cells,
+                    self.bridge_state
+                        .as_ref()
+                        .map_or(&[], |state| state.endpoint_records()),
+                );
+            }
+            terrain
                 .restore_user_loaded_land(&saved_land)
                 .map_err(|error| SnapshotRestoreError::InvalidSavedCellLand(error.to_string()))?;
         }
@@ -689,7 +704,7 @@ impl Simulation {
             .as_ref()
             .expect("validated overlay cache")
             .occupied_entries();
-        let native_tiberium_stats = if self.retains_snapshot_continuation() {
+        let native_tiberium_stats = if retain_continuation {
             crate::sim::ore_growth::NativeTiberiumRebuildStats::default()
         } else {
             self.rebuild_native_tiberium_queues_after_snapshot_load(rules, overlay_registry)?

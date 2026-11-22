@@ -310,6 +310,70 @@ impl ZoneGrid {
         self.pending_native_load
     }
 
+    /// Older VERA builds could copy the zero in CellClass+4C after CellClass::Load
+    /// (0x483A21) over the separately saved Map+68 plane. Both outermost diagonals
+    /// of allocated cells are outside every legal LocalSize (Set_Clipped_LocalSize
+    /// 0x567230, Is_Cell_In_Playfield 0x578460). RecalcZoneType (0x483C80) always
+    /// returns Outside there, before reading Land, overlays or objects.
+    pub(crate) fn recover_zeroed_player_terrain(
+        &mut self,
+        terrain: &ResolvedTerrainGrid,
+        saved_land: &crate::map::resolved_terrain::SavedCellLandValues,
+        replacements: &crate::map::resolved_terrain::DynamicTerrainCells,
+        records: &[crate::sim::bridge_state::BridgeEndpointRecord],
+    ) {
+        use crate::map::resolved_terrain::{ResolvedTerrainCell, zone_class};
+        let Some((width, _)) = self.native_bridge_source_size else {
+            return;
+        };
+        if width < 2 || (self.width, self.height) != (terrain.width(), terrain.height()) {
+            return;
+        }
+        let unchanged_land = |i, cell: &ResolvedTerrainCell| {
+            cell.land_type == cell.base_land_type
+                && cell.overlay_zone_type.is_none()
+                && cell.terrain_object_occupation.is_none()
+                && replacements.get(&(cell.rx, cell.ry)).is_none()
+                && saved_land.agrees_with_terrain(i, cell)
+        };
+        let reset_on_edge = |difference| {
+            self.base_topology
+                .movement_classes
+                .iter()
+                .zip(terrain.cells())
+                .enumerate()
+                .any(|(i, (&class, cell))| {
+                    i32::from(cell.rx) - i32::from(cell.ry) == difference
+                        && class == zone_class::GROUND
+                        && cell.zone_type == zone_class::OUTSIDE
+                        && unchanged_land(i, cell)
+                })
+        };
+        if !reset_on_edge(width - 1) || !reset_on_edge(1 - width) {
+            return;
+        }
+
+        // Recover static land only. A changed tile, an object's occupation or
+        // a removed overlay can have legitimate history different from the
+        // map template. Native RebuildZoneConnectivity (0x56C510) then floods
+        // the corrected classes with the saved heights and live bridge records.
+        for (i, (class, cell)) in self
+            .base_topology_mut()
+            .movement_classes
+            .iter_mut()
+            .zip(terrain.cells())
+            .enumerate()
+        {
+            if *class == zone_class::GROUND
+                && cell.zone_type != zone_class::GROUND
+                && unchanged_land(i, cell)
+            {
+                *class = cell.zone_type;
+            }
+        }
+        self.rebuild_retained_base(terrain.terrain_deformation(), records);
+    }
+
     pub(crate) fn saved_hierarchy(&self) -> &[ZoneLevelGraph; ZONE_PRECHECK_LEVELS] {
         self.hierarchy.saved_levels()
     }
@@ -1205,26 +1269,34 @@ impl ZoneGrid {
             }
             return;
         }
-        let base_topology = zone_build::rebuild_base_zone_topology(
-            self.base_topology.movement_classes.clone(),
-            self.base_topology.levels.clone(),
-            signed_levels,
-            bridge_records,
-            self.width,
-            self.height,
-            self.native_bridge_source_size,
-        );
+        self.rebuild_retained_base(signed_levels, bridge_records);
         self.maps = Self::project_movement_rows(
-            &base_topology,
+            &self.base_topology,
             path_grid,
             resolved_terrain,
             bridge_records,
             self.width,
             self.height,
         );
-        self.base_topology = base_topology;
         self.bridge_records = bridge_records.to_vec();
         self.rebuilt_unchanged = Some(signed_levels);
+    }
+
+    fn rebuild_retained_base(
+        &mut self,
+        signed_levels: bool,
+        records: &[crate::sim::bridge_state::BridgeEndpointRecord],
+    ) {
+        let base = &mut self.base_topology;
+        *base = zone_build::rebuild_base_zone_topology(
+            std::mem::take(&mut base.movement_classes),
+            std::mem::take(&mut base.levels),
+            signed_levels,
+            records,
+            self.width,
+            self.height,
+            self.native_bridge_source_size,
+        );
     }
 
     /// Replace the one shared route-selection hierarchy (test fixtures only).

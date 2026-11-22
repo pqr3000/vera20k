@@ -44,10 +44,26 @@ enum SavedLandRole {
 pub struct SavedCellLandValues {
     width: u16,
     height: u16,
-    cells: Vec<Option<u8>>,
+    cells: Vec<Option<SavedCellLand>>,
+}
+
+struct SavedCellLand {
+    land: u8,
+    template_zone: u8,
 }
 
 impl SavedCellLandValues {
+    /// The player saved this effective Land, and the map template and the
+    /// restored terrain independently give it the same movement class.
+    pub(crate) fn agrees_with_terrain(&self, index: usize, cell: &ResolvedTerrainCell) -> bool {
+        self.cells
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(|saved| {
+                saved.land == cell.land_type && saved.template_zone == cell.zone_type
+            })
+    }
+
     pub(crate) fn allocated_cells(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
         self.cells
             .iter()
@@ -172,7 +188,10 @@ impl SavedTerrainTemplate {
                     land: cell.land_type,
                 });
             }
-            cells.push(Some(cell.land_type));
+            cells.push(Some(SavedCellLand {
+                land: cell.land_type,
+                template_zone: cell.zone_type,
+            }));
         }
         Ok(SavedCellLandValues {
             width: self.width,
@@ -379,7 +398,9 @@ impl ResolvedTerrainGrid {
             return Err(SavedTerrainError::LiveLandShape);
         }
         for (index, saved) in saved.cells.iter().enumerate() {
-            let Some(land) = saved else { continue };
+            let Some(SavedCellLand { land, .. }) = saved else {
+                continue;
+            };
             // Cell CheckCellPassability48357D/4835D5 reads retained Land and
             // indexes the shared89EA40 table, never a saved per-cell speed row.
             let speed_costs = self.land_speed_costs(i32::from(*land));
