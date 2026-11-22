@@ -831,7 +831,14 @@ impl ZoneGrid {
             source_bridge,
             Some(cells),
         )?;
-        Some(source_zone == target_zone)
+        let reachable = source_zone == target_zone;
+        if !reachable {
+            log::trace!(
+                target: "vera20k::path",
+                "Can_Reach_Zone refused movement={movement_zone:?} from={source:?} zone={source_zone:#x} bridge={source_bridge} to={target:?} zone={target_zone:#x} bridge={destination_bridge}"
+            );
+        }
+        Some(reachable)
     }
 
     /// The native projected endpoint can address padding or a linear alias.

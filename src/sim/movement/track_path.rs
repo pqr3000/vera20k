@@ -607,6 +607,7 @@ impl Simulation {
     /// SetDestination(NULL, 1), else Foot 0x4DF0D0 (NavCom only) then the
     /// owner's idle entry (vt+0x484), whose AL the caller may return.
     /// Returns that AL (false after the NULL setter).
+    #[track_caller]
     pub(super) fn stop_or_take_next_waypoint(
         &mut self,
         id: u64,
@@ -616,6 +617,12 @@ impl Simulation {
         let Some(actor) = self.substrate.entities.get_mut(id) else {
             return false;
         };
+        log::trace!(
+            target: "vera20k::path",
+            "Drive/Ship stop unit={id} cell={:?} NavCom={:?} queued={} caller={}",
+            (actor.position.rx(), actor.position.ry()), actor.navigation.nav_com(),
+            actor.navigation.nav_queue().len(), std::panic::Location::caller(),
+        );
         clear_track_head(actor);
         if actor.navigation.nav_queue().is_empty() {
             self.assign_null_destination(id, rules, Some(rules.overlay_registry()), frame_effects);
@@ -749,6 +756,7 @@ impl Simulation {
     ///
     /// A Building takes Building455D50 ([`Self::set_building_destination`]):
     /// it clears an eligible rally ArchiveTarget and never writes Foot NavCom.
+    #[track_caller]
     pub(crate) fn assign_null_destination(
         &mut self,
         id: u64,
@@ -756,15 +764,16 @@ impl Simulation {
         registry: Option<&OverlayTypeRegistry>,
         frame_effects: &mut FrameEffects<'_>,
     ) {
-        let Some(category) = self
-            .substrate
-            .entities
-            .get(id)
-            .map(|actor| actor.category())
-        else {
+        let Some(actor) = self.substrate.entities.get(id) else {
             return;
         };
-        match category {
+        log::trace!(
+            target: "vera20k::path",
+            "null destination requested frame={} unit={id} cell={:?} NavCom={:?} caller={}",
+            self.session.binary_frame(), (actor.position.rx(), actor.position.ry()),
+            actor.navigation.nav_com(), std::panic::Location::caller(),
+        );
+        match actor.category() {
             EntityCategory::Unit => {
                 self.set_unit_null_destination(id, rules, registry, frame_effects);
             }

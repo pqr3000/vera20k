@@ -837,6 +837,11 @@ impl Simulation {
             MoveAction::Move => false,
         };
         if refused {
+            log::trace!(
+                target: "vera20k::path",
+                "move click unit={id} from={:?} clicked={clicked:?} refused action={action:?}",
+                (entity.position.rx(), entity.position.ry())
+            );
             return Ok(None);
         }
         let object = self
@@ -845,7 +850,7 @@ impl Simulation {
             .ok_or("Cell click receiver lacks its type")?;
         let map = self.click_map()?;
         let terrain = map.cells.terrain();
-        resolve_foot_cell_click(
+        let resolved = resolve_foot_cell_click(
             &map,
             &FootCellClick {
                 clicked: (clicked.0 as i16, clicked.1 as i16),
@@ -859,7 +864,13 @@ impl Simulation {
                     &self.fog, terrain, viewer, cell,
                 ))
             },
-        )
+        );
+        log::trace!(
+            target: "vera20k::path",
+            "move click unit={id} movement={:?} from={:?} clicked={clicked:?} action={action:?} destination={resolved:?}",
+            object.movement_zone, (entity.position.rx(), entity.position.ry()),
+        );
+        resolved
     }
 
     /// Whether a Move click on `clicked` spawns the MoveFlash for receiver

@@ -148,6 +148,11 @@
 //! and takes the answer in place of its core search only when the request
 //! and the Foot's own search inputs are the ones the answer was computed for
 //! ([`FootSearchKey`]); otherwise it searches as usual.
+//! Only routes can be reused. At the Foot's turn the locomotor checks the
+//! next cell again. A frame-start failure has no step to check: a blocker
+//! may already have left, and a false NULL from Find_Path would stop the
+//! driver and clear a distant NavCom (0x004D4044, 0x004D4143). A Foot whose
+//! batch found no route uses its scheduled turn to search the live world.
 //!
 //! The batch searches before Mark0 lifts the Foot off its cell; see
 //! [`MoverLift::Emulated`] for what the search emulates and drops. The
@@ -172,7 +177,6 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::foot_path::MoverLift;
-use super::movement_path::MovePathFailure;
 use super::movement_tick::FootPathRequest;
 use crate::map::entities::EntityCategory;
 use crate::map::resolved_terrain::ResolvedTerrainGrid;
@@ -185,7 +189,6 @@ use crate::sim::game_entity::GameEntity;
 use crate::sim::intern::InternedId;
 use crate::sim::mission::MissionId;
 use crate::sim::overlay_grid::OverlayGrid;
-use crate::sim::pathfinding::zone_search::PathSearchFailure;
 use crate::sim::pathfinding::{BlockerNeighborCounts, PathGrid, search_steps};
 use crate::sim::radio::Contacts;
 use crate::sim::world::{EntryFacts, Simulation};
@@ -524,7 +527,7 @@ struct ReadySlot {
 #[derive(Clone, Debug, PartialEq)]
 struct BatchedSearch {
     key: FootSearchKey,
-    found: Result<Vec<i32>, MovePathFailure>,
+    directions: Vec<i32>,
 }
 
 /// What a core search reads from its request and its mover besides the
@@ -692,7 +695,7 @@ impl Simulation {
         request: &FootPathRequest,
         goal: DriveCoord,
         rules: &RuleSet,
-    ) -> Option<Result<Vec<i32>, MovePathFailure>> {
+    ) -> Option<Vec<i32>> {
         // Only ordinary zero-prefix requests register with the batch. A
         // train extending its last queued step has a different search origin.
         if request.retain_head {
@@ -719,7 +722,7 @@ impl Simulation {
         {
             batch.used[slot.request.kind()] += 1;
         }
-        Some(answer.found)
+        Some(answer.directions)
     }
 
     /// The start of the live object pass: search for the Foots registered
@@ -825,6 +828,11 @@ impl Simulation {
             batch.answered = batch.ready.keys().copied().collect();
         }
         let answered = batch.ready.len();
+        log::trace!(
+            target: "vera20k::path",
+            "path batch frame={} waiting={waiting} scheduled={searched} answered={answered} expanded={expanded}",
+            self.session.binary_frame(),
+        );
         batch.stats.finish(
             started.elapsed(),
             waiting,
@@ -1054,20 +1062,21 @@ impl Simulation {
             facts,
             keep_searching,
         );
-        if read_own_cell
-            || matches!(
-                found,
-                Err(MovePathFailure::MissingGrid
-                    | MovePathFailure::Search(
-                        PathSearchFailure::CellEntryUnavailable(_) | PathSearchFailure::Stopped
-                    ))
-            )
-        {
+        if read_own_cell {
             return None;
         }
+        let directions = found
+            .inspect_err(|reason| {
+                log::trace!(
+                    target: "vera20k::path",
+                    "frame-start search frame={} unit={id} to={:?} result={reason:?}",
+                    self.session.binary_frame(), super::foot_path::coord_cell(goal),
+                );
+            })
+            .ok()?;
         Some(BatchedSearch {
             key: self.foot_search_key(&request, goal, rules)?,
-            found,
+            directions,
         })
     }
 
