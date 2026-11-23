@@ -5,7 +5,7 @@
 //! `[General] BuildingTypeSelectable`, live only with Ares, admits every
 //! building. These tests drive the tap that reads that gate, not the gate
 //! alone.
-use crate::app::input::entity_pick::compute_type_select_tap_with_playfield;
+use crate::app::input::entity_pick::compute_type_select_tap;
 use crate::app::types::TypeSelectOutcome;
 use crate::map::entities::EntityCategory;
 use crate::rules::ini_parser::IniFile;
@@ -69,7 +69,7 @@ fn tap(
     rules: &RuleSet,
     interner: &crate::sim::intern::StringInterner,
 ) -> Vec<u64> {
-    let result = compute_type_select_tap_with_playfield(
+    let result = compute_type_select_tap(
         entities,
         order,
         order,
@@ -79,7 +79,6 @@ fn tap(
         Some(rules),
         Some(interner),
         true,
-        false,
     );
     assert_eq!(result.outcome, TypeSelectOutcome::Map);
     result.mutation.select

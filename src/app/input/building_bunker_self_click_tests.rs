@@ -7,9 +7,7 @@ use super::*;
 use crate::app::input::commands::schedule_command_in_sim;
 use crate::app::input::cursor::capability_cursor_for_hover;
 use crate::app::input::dispatch::selected_stable_ids_in_order;
-use crate::app::input::entity_pick::{
-    compute_click_selection_snapshot_with_playfield, hover_target_at_point,
-};
+use crate::app::input::entity_pick::{compute_click_selection_snapshot, hover_target_at_point};
 use crate::app::types::CursorFeedbackKind;
 use crate::headless_scenario::{HeadlessScenario, battle_session, load_session};
 use crate::sim::production::{
@@ -59,7 +57,7 @@ fn point_select(scene: &mut HeadlessScenario, id: u64, local: &str) -> HoverTarg
         );
         let encounter: Vec<_> = sim.display_layers().ordered_ids().copied().collect();
         let current = selected_stable_ids_in_order(Some(sim), Some(rules), &[], false);
-        let mutation = compute_click_selection_snapshot_with_playfield(
+        let mutation = compute_click_selection_snapshot(
             sim,
             &encounter,
             &current,
@@ -70,7 +68,6 @@ fn point_select(scene: &mut HeadlessScenario, id: u64, local: &str) -> HoverTarg
             false,
             Some(rules),
             Some(sim.interner()),
-            true,
             sim.resolved_terrain(),
         )
         .expect("actual click selection mutation");

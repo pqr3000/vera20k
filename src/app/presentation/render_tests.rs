@@ -69,6 +69,7 @@ fn test_click_additive_toggles_membership() {
         true,
         None,
         None,
+        None,
     )
     .expect("snapshot");
     assert_eq!(added.select, vec![2]);
@@ -82,6 +83,7 @@ fn test_click_additive_toggles_membership() {
         first_x,
         first_y,
         true,
+        None,
         None,
         None,
     )

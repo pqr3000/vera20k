@@ -69,7 +69,7 @@ fn shift_t_click_replaces_a_selected_enemy(ares_way: bool) {
     let ares = rules.ares();
     assert_eq!(ares, ares_way);
     let sim = scene();
-    let click = compute_type_select_click_mutation_with_playfield(
+    let click = compute_type_select_click_mutation(
         sim.entities(),
         &[1, 2, 3, 4, 5, 6],
         &[5],
@@ -78,7 +78,6 @@ fn shift_t_click_replaces_a_selected_enemy(ares_way: bool) {
         Some("me"),
         Some(&rules),
         Some(sim.interner()),
-        false,
     );
     assert!(click.clear && click.deselect.is_empty());
     let grouped = if ares { vec![1, 2, 3] } else { vec![1] };
@@ -100,7 +99,7 @@ fn type_selection_group_reaches_every_path(ares_way: bool) {
     let ares = disabled_deploy.ares();
     assert_eq!(ares, ares_way);
     let tap = |rules: &RuleSet| {
-        compute_type_select_tap_with_playfield(
+        compute_type_select_tap(
             sim.entities(),
             &order,
             &order,
@@ -110,7 +109,6 @@ fn type_selection_group_reaches_every_path(ares_way: bool) {
             Some(rules),
             Some(sim.interner()),
             true,
-            false,
         )
         .mutation
         .select
@@ -124,7 +122,7 @@ fn type_selection_group_reaches_every_path(ares_way: bool) {
         if ares { vec![1, 2, 3, 4] } else { vec![1, 4] }
     );
     let grouped = if ares { vec![1, 2, 3] } else { vec![1] };
-    let click = compute_type_select_click_mutation_with_playfield(
+    let click = compute_type_select_click_mutation(
         sim.entities(),
         &order,
         &[],
@@ -133,11 +131,10 @@ fn type_selection_group_reaches_every_path(ares_way: bool) {
         Some("me"),
         Some(&disabled_deploy),
         Some(sim.interner()),
-        false,
     );
     assert!(click.clear);
     assert_eq!(click.select, grouped);
-    let remove = compute_type_select_click_mutation_with_playfield(
+    let remove = compute_type_select_click_mutation(
         sim.entities(),
         &order,
         &[1, 2, 3, 4],
@@ -146,7 +143,6 @@ fn type_selection_group_reaches_every_path(ares_way: bool) {
         Some("me"),
         Some(&disabled_deploy),
         Some(sim.interner()),
-        false,
     );
     assert_eq!(remove.deselect, grouped);
     assert!(!remove.clear);
@@ -160,7 +156,7 @@ fn type_selection_group_reaches_every_path(ares_way: bool) {
             (10.0, 10.0)
         }
     }
-    let band = compute_type_select_box_mutation_with_playfield(
+    let band = compute_type_select_box_mutation(
         AtPoint(sim.entities()),
         &[1, 2],
         &order,
@@ -174,7 +170,6 @@ fn type_selection_group_reaches_every_path(ares_way: bool) {
         false,
         Some(&disabled_deploy),
         Some(sim.interner()),
-        false,
     );
     assert_eq!(band.select, if ares { vec![1, 2, 3] } else { vec![1, 2] });
 }

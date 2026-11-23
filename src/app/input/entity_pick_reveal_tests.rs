@@ -157,7 +157,7 @@ fn native_click_shroud_controls_match_cursor_and_both_object_pickers() {
                 row["name"]
             );
             for additive in [false, true] {
-                let mutation = compute_click_selection_snapshot_with_playfield(
+                let mutation = compute_click_selection_snapshot(
                     sim.entities(),
                     &encounter_order,
                     &[],
@@ -168,7 +168,6 @@ fn native_click_shroud_controls_match_cursor_and_both_object_pickers() {
                     additive,
                     None,
                     Some(sim.interner()),
-                    false,
                     Some(terrain),
                 );
                 assert_eq!(

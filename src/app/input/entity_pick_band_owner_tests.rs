@@ -90,7 +90,7 @@ fn encounter_order(sim: &Simulation) -> Vec<u64> {
 
 fn band(source: impl PickSource, sim: &Simulation, local_owner: Option<&str>) -> SelectionMutation {
     let order = encounter_order(sim);
-    compute_box_selection_snapshot_with_playfield(
+    compute_box_selection_snapshot(
         source,
         &order,
         &order,
@@ -105,7 +105,6 @@ fn band(source: impl PickSource, sim: &Simulation, local_owner: Option<&str>) ->
         None,
         Some(sim.houses()),
         Some(sim.interner()),
-        false,
     )
     .expect("the box covers drawn objects")
 }
@@ -191,7 +190,7 @@ fn bare_store_band_box_keeps_exact_local_owner_identity() {
 /// One T tap over the fixture world with `selected` already selected.
 fn type_select_tap(sim: &Simulation, selected: &[u64]) -> TypeSelectTapResult {
     let order = encounter_order(sim);
-    compute_type_select_tap_with_playfield(
+    compute_type_select_tap(
         sim,
         &order,
         &order,
@@ -200,7 +199,6 @@ fn type_select_tap(sim: &Simulation, selected: &[u64]) -> TypeSelectTapResult {
         Some("Russians"),
         None,
         Some(sim.interner()),
-        false,
         false,
     )
 }
@@ -234,7 +232,7 @@ fn shift_click_conscript(sim: &Simulation, selected: &[u64]) -> SelectionMutatio
     let conscript = sim.entities().get(2).expect("the fixture conscript");
     let (x, y) = crate::render::locomotor_visual::screen_position(conscript);
     let order = encounter_order(sim);
-    compute_click_selection_snapshot_with_playfield(
+    compute_click_selection_snapshot(
         sim,
         &order,
         selected,
@@ -245,7 +243,6 @@ fn shift_click_conscript(sim: &Simulation, selected: &[u64]) -> SelectionMutatio
         true,
         None,
         Some(sim.interner()),
-        false,
         None,
     )
     .expect("the click lands on the conscript")
@@ -264,4 +261,72 @@ fn campaign_shift_click_adds_to_a_player_controlled_selection() {
     // With a nonzero game mode Romanov's House is another player's.
     let (sim, _) = world(false, true);
     assert!(shift_click_conscript(&sim, &[1]).clear);
+}
+
+#[test]
+fn a_visible_tank_outside_the_playfield_can_be_clicked_and_boxed() {
+    let (mut sim, houses) = world(true, false);
+    spawn_mobile(&mut sim, 4, 33, 29, houses.local, "SREF");
+    let tank = sim.entity_mut_for_test(4).unwrap();
+    tank.set_in_playfield(false); // Chronosphere arrival beyond the northern edge.
+    let (x, y) = crate::render::locomotor_visual::screen_position(tank);
+    let owner = Some("Russians");
+    let names = Some(sim.interner());
+    let click = compute_click_selection_snapshot(
+        &sim,
+        &[4],
+        &[],
+        None,
+        owner,
+        x,
+        y,
+        false,
+        None,
+        names,
+        None,
+    )
+    .unwrap();
+    let band = compute_box_selection_snapshot(
+        &sim,
+        &[4],
+        &[4],
+        &[],
+        None,
+        owner,
+        x - 8.,
+        y - 8.,
+        x + 8.,
+        y + 8.,
+        false,
+        None,
+        Some(sim.houses()),
+        names,
+    )
+    .unwrap();
+    assert_eq!((click.select, band.select), (vec![4], vec![4]));
+}
+
+#[test]
+fn type_select_finds_an_off_playfield_peer_on_screen_before_widening_to_the_map() {
+    let (mut sim, houses) = world(true, false);
+    sim.entity_mut_for_test(2).unwrap().set_in_playfield(true);
+    spawn_mobile(&mut sim, 4, 33, 29, houses.local, "E2");
+    sim.entity_mut_for_test(4).unwrap().set_in_playfield(false);
+    spawn_mobile(&mut sim, 5, 50, 50, houses.local, "E2");
+    sim.entity_mut_for_test(5).unwrap().set_in_playfield(true);
+    let tap = compute_type_select_tap(
+        &sim,
+        &[2, 4],
+        &[2, 4, 5],
+        &[2],
+        None,
+        Some("Russians"),
+        None,
+        Some(sim.interner()),
+        false,
+    );
+    assert_eq!(
+        (tap.outcome, tap.mutation.select),
+        (crate::app::types::TypeSelectOutcome::Screen, vec![2, 4])
+    );
 }
