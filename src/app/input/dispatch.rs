@@ -17,12 +17,9 @@ use crate::app::AppState;
 use crate::app::input::commands::{place_ready_building_at_cell, preferred_local_owner_name};
 use crate::app::input::context_order::{ContextOrderTarget, try_queue_context_order};
 use crate::app::input::entity_pick::{
-    SelectionMutation, compute_box_selection_snapshot_with_playfield,
-    compute_click_selection_snapshot_with_playfield,
-    compute_double_click_type_select_with_playfield,
-    compute_type_select_box_mutation_with_playfield,
-    compute_type_select_click_mutation_with_playfield, map_entity_creation_order,
-    pick_entity_at_point,
+    SelectionMutation, compute_box_selection_snapshot, compute_click_selection_snapshot,
+    compute_double_click_type_select, compute_type_select_box_mutation,
+    compute_type_select_click_mutation, map_entity_creation_order, pick_entity_at_point,
 };
 use crate::app::input::precedence::{ModalPage, modal_page};
 use crate::app::types::OrderMode;
@@ -816,7 +813,7 @@ fn tactical_left_up(state: &mut AppState) {
                         sim.resolved_terrain(),
                     );
                     queued_selection = if let Some(clicked_id) = picked {
-                        Some(compute_type_select_click_mutation_with_playfield(
+                        Some(compute_type_select_click_mutation(
                             sim,
                             scope_order,
                             &current_selection,
@@ -825,10 +822,9 @@ fn tactical_left_up(state: &mut AppState) {
                             preferred_local_owner_name(state).as_deref(),
                             state.rules(),
                             Some(sim.interner()),
-                            sim.playfield_bounds().is_some(),
                         ))
                     } else {
-                        compute_click_selection_snapshot_with_playfield(
+                        compute_click_selection_snapshot(
                             crate::app::input::entity_pick::presented(state, sim),
                             &click_order,
                             &current_selection,
@@ -839,13 +835,12 @@ fn tactical_left_up(state: &mut AppState) {
                             shift,
                             state.rules(),
                             Some(sim.interner()),
-                            sim.playfield_bounds().is_some(),
                             sim.resolved_terrain(),
                         )
                     };
                     held_type_select_batch = true;
                 } else {
-                    queued_selection = compute_click_selection_snapshot_with_playfield(
+                    queued_selection = compute_click_selection_snapshot(
                         crate::app::input::entity_pick::presented(state, sim),
                         &click_order,
                         &current_selection,
@@ -856,7 +851,6 @@ fn tactical_left_up(state: &mut AppState) {
                         shift,
                         state.rules(),
                         Some(sim.interner()),
-                        sim.playfield_bounds().is_some(),
                         sim.resolved_terrain(),
                     );
                 }
@@ -875,7 +869,7 @@ fn tactical_left_up(state: &mut AppState) {
                     max_y / z + state.match_state.input.camera_y,
                 );
                 if held_type_select {
-                    queued_selection = Some(compute_type_select_box_mutation_with_playfield(
+                    queued_selection = Some(compute_type_select_box_mutation(
                         crate::app::input::entity_pick::presented(state, sim),
                         &screen_order,
                         scope_order,
@@ -889,14 +883,13 @@ fn tactical_left_up(state: &mut AppState) {
                         shift,
                         state.rules(),
                         Some(sim.interner()),
-                        sim.playfield_bounds().is_some(),
                     ));
                     held_type_select_batch = true;
                 } else {
                     let preflight_order = band_preflight_order
                         .as_deref()
                         .unwrap_or(screen_order.as_slice());
-                    queued_selection = compute_box_selection_snapshot_with_playfield(
+                    queued_selection = compute_box_selection_snapshot(
                         crate::app::input::entity_pick::presented(state, sim),
                         preflight_order,
                         &screen_order,
@@ -911,7 +904,6 @@ fn tactical_left_up(state: &mut AppState) {
                         state.rules(),
                         Some(sim.houses()),
                         Some(sim.interner()),
-                        sim.playfield_bounds().is_some(),
                     );
                 }
             }
@@ -962,7 +954,7 @@ fn double_click_type_select(state: &AppState, sx: f32, sy: f32) -> Option<Select
     let world_y = sy / state.match_state.input.zoom_level + state.match_state.input.camera_y;
     let fog = (!state.match_state.sandbox_full_visibility)
         .then_some((sim.fog(), sim.house_alliances().as_map()));
-    compute_double_click_type_select_with_playfield(
+    compute_double_click_type_select(
         crate::app::input::entity_pick::presented(state, sim),
         &click_order,
         &screen_order,
@@ -972,7 +964,6 @@ fn double_click_type_select(state: &AppState, sx: f32, sy: f32) -> Option<Select
         world_y,
         state.rules(),
         Some(sim.interner()),
-        sim.playfield_bounds().is_some(),
         sim.resolved_terrain(),
     )
 }

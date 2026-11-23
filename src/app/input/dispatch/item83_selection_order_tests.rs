@@ -703,6 +703,7 @@ fn a_shift_click_on_an_enemy_selects_it_through_select() {
             true,
             Some(&rules),
             Some(sim.interner()),
+            None,
         )
         .expect("the click picked the enemy");
         assert_eq!(

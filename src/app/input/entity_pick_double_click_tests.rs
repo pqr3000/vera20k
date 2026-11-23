@@ -68,7 +68,7 @@ fn double_click(world: &World, clicked: u64, screen_order: &[u64]) -> Option<Sel
     let (x, y) = crate::render::locomotor_visual::screen_position(
         world.sim.entities().get(clicked).unwrap(),
     );
-    compute_double_click_type_select_with_playfield(
+    compute_double_click_type_select(
         &world.sim,
         &world.click_order,
         screen_order,
@@ -78,7 +78,6 @@ fn double_click(world: &World, clicked: u64, screen_order: &[u64]) -> Option<Sel
         y,
         None,
         Some(world.sim.interner()),
-        false,
         world.sim.resolved_terrain(),
     )
 }
@@ -112,7 +111,7 @@ fn double_click_on_an_enemy_or_empty_ground_keeps_the_plain_click() {
         None,
         "an enemy object is not a local type-select seed"
     );
-    let mutation = compute_double_click_type_select_with_playfield(
+    let mutation = compute_double_click_type_select(
         &world.sim,
         &world.click_order,
         &world.screen_order,
@@ -122,7 +121,6 @@ fn double_click_on_an_enemy_or_empty_ground_keeps_the_plain_click() {
         10_000.0,
         None,
         Some(world.sim.interner()),
-        false,
         world.sim.resolved_terrain(),
     );
     assert_eq!(mutation, None, "ground keeps the ordinary click");

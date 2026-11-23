@@ -19,9 +19,7 @@ use crate::app::AppState;
 use crate::app::input::commands::{
     preferred_command_owner, preferred_local_owner_name, queue_house_cheer,
 };
-use crate::app::input::entity_pick::{
-    compute_type_select_tap_with_playfield, map_entity_creation_order,
-};
+use crate::app::input::entity_pick::{compute_type_select_tap, map_entity_creation_order};
 use crate::app::input::hotkeys::{HotkeyCommand, HotkeyFallback, HotkeyResolution};
 use crate::app::input::sidebar_eva;
 use crate::app::match_runtime::sim_host::SimWrite;
@@ -113,7 +111,7 @@ fn execute_type_select_tap(state: &mut AppState) {
         );
         let fog = (!state.match_state.sandbox_full_visibility)
             .then_some((sim.fog(), sim.house_alliances().as_map()));
-        compute_type_select_tap_with_playfield(
+        compute_type_select_tap(
             sim,
             &screen_order,
             &map_order,
@@ -123,7 +121,6 @@ fn execute_type_select_tap(state: &mut AppState) {
             state.rules(),
             Some(sim.interner()),
             state.match_state.input.type_select.across_map,
-            sim.playfield_bounds().is_some(),
         )
     };
     let outcome = result.outcome;
