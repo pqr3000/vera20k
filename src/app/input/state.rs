@@ -5,11 +5,11 @@
 //! shells that reuse the same cursor/key plumbing). Sim-authoritative input —
 //! queued commands — lives in the simulation, never here.
 
-use crate::render::upscale_pass::ZoomGeometry;
 use crate::sim::intern::InternedId;
 use crate::sim::snapshot::saved_local_view::{
     SavedCursorModes, SavedLocalView, SavedLocalViewError, SavedTargeting,
 };
+use crate::ui::main_menu_dialogs::options::ZoomGeometry;
 use std::collections::HashSet;
 use winit::event::MouseButton;
 use winit::keyboard::{KeyCode, ModifiersState};
@@ -242,7 +242,7 @@ pub(crate) struct MatchInputState {
     pub(crate) cursor_y: f32,
     /// The match zoom `cursor_x`/`cursor_y` are in; `None` is window pixels.
     /// `AppState::sync_cursor_space` keeps it matching the current screen.
-    pub(crate) cursor_zoom: Option<crate::render::upscale_pass::ZoomGeometry>,
+    pub(crate) cursor_zoom: Option<crate::ui::main_menu_dialogs::options::ZoomGeometry>,
     /// Last physical window event, used only to measure confined cursor motion.
     /// The source cursor above remains authoritative; this anchor is neither
     /// saved nor simulation state and is discarded when pointer focus changes.
@@ -535,12 +535,12 @@ impl MatchInputState {
             self.last_selection_click = None;
             return false;
         }
-        crate::ui::shell::list::is_double_click(
+        vera20k_gui::shell::list::is_double_click(
             &mut self.last_selection_click,
             now,
             point.0,
             point.1,
-            crate::ui::shell::saved_file_input::host_double_click_limits(),
+            crate::ui::shell::controller::host_double_click_limits(),
         )
     }
 
