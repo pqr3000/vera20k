@@ -144,6 +144,48 @@ fn spent_orca(rules: &RuleSet, human: bool) -> (Simulation, u64, u64) {
 }
 
 #[test]
+fn only_a_live_aircraft_requests_docking() {
+    use crate::sim::combat::TargetKind;
+    use crate::sim::components::NavTargetRef;
+    use crate::sim::radio::{RadioMessage, take_transmit_log};
+
+    let rules = RuleSet::from_ini(&IniFile::from_str(RULES)).expect("rules");
+    for health in [1, 0] {
+        let (mut sim, plane, airfield) = spent_orca(&rules, false);
+        // An offline airfield refuses the first request. This lets the test observe
+        // a stray DOCKING without the old MOVE_HERE loop exhausting the stack.
+        sim.substrate
+            .entities
+            .get_mut(airfield)
+            .unwrap()
+            .set_building_online_for_test(false);
+        let aircraft = sim.substrate.entities.get_mut(plane).unwrap();
+        aircraft.health.set_for_test(health);
+        aircraft
+            .mission
+            .set_current_for_test(MissionId::from_known(MissionType::Enter), 0);
+        let dock = NavTargetRef::object(airfield);
+        take_transmit_log();
+        sim.assign_aircraft_destination(plane, Some(dock), &rules, &mut Default::default());
+
+        let requested = take_transmit_log().iter().any(|msg| {
+            msg.sender_sid == plane
+                && msg.target_sid == airfield
+                && msg.msg == RadioMessage::CanDock.code()
+        });
+        assert_eq!(requested, health > 0, "docking request at {health} HP");
+        if health == 0 {
+            let aircraft = sim.substrate.entities.get(plane).unwrap();
+            assert_eq!(
+                aircraft.archive_target(),
+                Some(TargetKind::Entity(airfield))
+            );
+            assert_eq!(aircraft.navigation.nav_com(), Some(dock));
+        }
+    }
+}
+
+#[test]
 #[ignore = "slow; run when changing what it covers"]
 fn a_spent_aircraft_enters_its_dock_reloads_and_guards_on_the_pad() {
     let rules = RuleSet::from_ini(&IniFile::from_str(RULES)).expect("rules");
