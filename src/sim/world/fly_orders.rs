@@ -168,14 +168,22 @@ impl Simulation {
         ) else {
             return ControlFlow::Continue(Some(dock));
         };
-        let in_contact = !aircraft.seldom.radio_contacts.is_empty();
-        let has_slot = target.seldom.radio_contacts.has_free_or(id);
-        let holds_aircraft = target.seldom.radio_contacts.contains(id);
         let archive = |sim: &mut Self, target: Option<NavTargetRef>| {
             if let Some(entity) = sim.substrate.entities.get_mut(id) {
                 entity.set_archive_target(target.map(TargetKind::from));
             }
         };
+        // A dying aircraft can get a new dock as it leaves its team. At zero
+        // health it refuses HELLO (RadioClass::Receive_Message, 0x0065A8B2).
+        // Foot's MOVE_HERE would call this setter again (0x004D91EB) without
+        // a radio contact. Keep the destination for Foot and skip the handshake.
+        if !aircraft.is_alive() {
+            archive(self, Some(dock));
+            return ControlFlow::Continue(Some(dock));
+        }
+        let in_contact = !aircraft.seldom.radio_contacts.is_empty();
+        let has_slot = target.seldom.radio_contacts.has_free_or(id);
+        let holds_aircraft = target.seldom.radio_contacts.contains(id);
         if in_contact {
             if !has_slot {
                 archive(self, Some(dock));
