@@ -8,7 +8,7 @@ use vera20k_gui::{Gui, InputEvent, Key, NodeId, NodeKind, NodeSpec, Prop, Value}
 
 use crate::ui::shell::controller::DialogController;
 use crate::ui::shell::descriptor::DialogResourceId;
-use crate::ui::shell::geom::{RectPx, ShellScale};
+use crate::ui::shell::geom::{RectPx, ShellAlign, ShellScale};
 use crate::ui::shell::layout::RectTable;
 use crate::ui::shell::layout_data;
 use crate::ui::shell::menu_page::{MenuPageButtonSpec, MenuPageLayout, MenuPageSpec};
@@ -27,6 +27,10 @@ pub(crate) const PLAYERS: u16 = 0x53E;
 pub(crate) const CHAT_LOG: u16 = 0x53F;
 pub(crate) const OBSERVER_IMAGE: u16 = 0x75F;
 pub(crate) const OBSERVER_TOGGLE: u16 = 0x760;
+/// The heading `0x694` and the status line `0x695`: kind-1 statics whose
+/// text and reveal the page gives while they show.
+pub(crate) const TITLE: u16 = 0x694;
+pub(crate) const STATUS: u16 = 0x695;
 
 pub(crate) const PAGE: MenuPageSpec = MenuPageSpec {
     dialog: DialogResourceId(0xBB),
@@ -76,16 +80,27 @@ pub(crate) fn spec() -> NodeSpec {
             .with(Prop::TextInset, Value::Rect(RectPx::new(2, 0, 2, 0)))
             .with(Prop::NoSelectionFill, Value::Bool(id == CHAT_LOG))
     };
+    let text = |id: u16, align: ShellAlign| {
+        NodeSpec::new(NodeKind::Text)
+            .id(i32::from(id))
+            .with(Prop::Align, Value::Int(align.0.into()))
+    };
+    // The captions, top-left.
+    let labels = LABELS.map(|(id, key)| text(id, ShellAlign::NONE).label(key));
     NodeSpec::new(NodeKind::Dialog)
+        .children(labels)
         .children(crate::ui::shell::page::menu_buttons(&PAGE))
         .child(
             node(NodeKind::Edit, NAME)
+                .with(Prop::ByteOnly, Value::Bool(true))
                 .with(Prop::MaxBytes, Value::Int(NAME_LIMIT as i32))
                 .with(Prop::Rejected, Value::Text(",".into())),
         )
         .child(node(NodeKind::Edit, CHAT))
         .children([GAMES, PLAYERS, CHAT_LOG].map(list))
         .children([OBSERVER_TOGGLE, OBSERVER_IMAGE].map(|id| node(NodeKind::Checkbox, id)))
+        .child(text(TITLE, ShellAlign::PANEL_TITLE))
+        .child(text(STATUS, ShellAlign::NONE))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,13 +621,18 @@ impl LanLobbyState {
     /// (`0x4D1` at `0x5DE0E3`), which drops units from 0x100 up
     /// (`0x61525E..0x61526A`). Typed keys reach gamemd, an ANSI program, as
     /// code-page bytes and get in, but input-method characters arrive widened
-    /// (`0x6151F6..0x61520C`) and stay out; VERA offers no input method here
-    /// either. VERA gets keys as text, so the edit keeps the text (typed
-    /// through the code page, [`name_input`]) and admits a character while
-    /// the name's code-page bytes fit in 16 (`MaxBytes`); commas stay out
-    /// (`Rejected`). BB narrows its edit's units by their low byte
-    /// (`0x5DDE07`), which gives back the code-page bytes its ANSI edit was
-    /// typed in; the app saves the text through the code page instead.
+    /// (`0x6151F6..0x61520C`) and stay out. VERA gets keys as UTF-16 text
+    /// and its edit applies the same filter to it (`ByteOnly`): `é` gets in,
+    /// while an input method's Chinese or an emoji stays out instead of
+    /// turning into `?`. A name set rather than typed keeps what it holds, as
+    /// in gamemd. The edit admits a character while the name's code-page bytes
+    /// fit in 16 (`MaxBytes`); commas stay out (`Rejected`). BB narrows its
+    /// edit's units by their low byte (`0x5DDE07`), which gives back the
+    /// code-page bytes its ANSI edit was typed in; the app saves the text
+    /// through the code page instead. RESIDUAL: gamemd's units are code-page
+    /// bytes, so it also takes a code page's letters beyond Latin-1 (`€` in
+    /// 1252, Cyrillic in 1251); VERA's are Unicode, so those stay out, and the
+    /// wire's low-byte name (`net::lan_messages`) could not carry them.
     pub(crate) fn name_edited(&mut self, text: &str) -> (Option<String>, Option<LanLobbyAction>) {
         let collapse = !text.is_empty() && text.chars().all(|c| c == ' ');
         let value = if collapse { "" } else { text };
@@ -654,7 +674,7 @@ pub(crate) fn key(
         return actions;
     }
     // Each typed character's EN_CHANGE announces the name (`0x5DDD90`).
-    for input in edit_inputs(code, Some(&name_input(text.unwrap_or_default()))) {
+    for input in edit_inputs(code, text) {
         controller.on_input(input);
         for event in controller.drain_events() {
             if let vera20k_gui::UiEvent::TextChanged { text, .. } = event {
@@ -667,16 +687,6 @@ pub(crate) fn key(
         }
     }
     actions
-}
-
-/// Typed text for the name edit, as the code page passes it (`?` for a
-/// character it cannot hold); a character of two UTF-16 units, such as an
-/// emoji, stays out, so the edit's one-unit keys never split one.
-pub(crate) fn name_input(text: &str) -> String {
-    crate::util::native_string::acp_round_trip(text)
-        .chars()
-        .filter(|c| c.len_utf16() == 1)
-        .collect()
 }
 
 /// One port of the shared5EDD00 chat-length prepass (BB/BC/BD and WOL).
@@ -713,17 +723,86 @@ pub(crate) const LABELS: [(u16, &str); 3] = [
 pub(crate) struct LanLobbyLayout {
     pub(crate) page: MenuPageLayout,
     pub(crate) rects: RectTable,
+    /// Whether VERA's send key sits beside the chat edit, and the edit and
+    /// its row move to make room. Off keeps the native BB layout.
+    pub(crate) touch_send: bool,
 }
 
 impl LanLobbyLayout {
     pub(crate) fn new(width: i32, height: i32, scale: ShellScale) -> Self {
         let (page, rects) = layout_data::menu_page(&PAGE, "0xBB", scale, width, height);
-        Self { page, rects }
+        Self {
+            page,
+            rects,
+            touch_send: true,
+        }
+    }
+
+    /// The layout with VERA's touch send key, for a platform without Enter.
+    pub(crate) fn with_touch_send(mut self, on: bool) -> Self {
+        self.touch_send = on;
+        self
     }
 
     /// Control `id`'s window; none for a control BB does not show.
     pub(crate) fn rect(&self, id: u16) -> Option<RectPx> {
         self.rects.get(id).or_else(|| self.page.button_rect(id))
+    }
+
+    /// Where widget `id` of [`spec`] sits: [`Self::rect`], the heading on
+    /// the panel's title and the status line's text in its window.
+    pub(crate) fn widget_rect(&self, id: u16) -> Option<RectPx> {
+        match id {
+            TITLE => Some(self.page.title),
+            STATUS => Some(crate::ui::shell::layout::status_text_rect(
+                self.page.status_help,
+            )),
+            _ => self.rect(id),
+        }
+    }
+
+    /// The chat row: the native place, or for a touch platform the room's
+    /// spacing beside VERA's send key, with the log's bottom edge to the input
+    /// row's top edge at 5 authored px.
+    fn chat_row(&self) -> Option<RectPx> {
+        let chat = self.rect(CHAT)?;
+        if !self.touch_send {
+            return Some(chat);
+        }
+        let log = self.rect(CHAT_LOG)?;
+        let scale = self.page.scale;
+        let y = log.y + log.h + (5.0 * scale.factor()).round() as i32;
+        Some(RectPx::new(chat.x, y, chat.w, chat.h))
+    }
+
+    /// VERA's send key beside the chat box, at the LAN room's slot.
+    pub(crate) fn chat_send(&self) -> Option<RectPx> {
+        if !self.touch_send {
+            return None;
+        }
+        let chat = self.chat_row()?;
+        let log = self.rect(CHAT_LOG)?;
+        Some(crate::ui::shell::geom::room_chat_send_rect(
+            chat,
+            log,
+            self.page.scale,
+        ))
+    }
+
+    /// The chat edit's rect: the native one, or the room's width and row
+    /// position beside the send key.
+    pub(crate) fn chat_text(&self) -> Option<RectPx> {
+        let chat = self.rect(CHAT)?;
+        if !self.touch_send {
+            return Some(chat);
+        }
+        let row = self.chat_row()?;
+        let log = self.rect(CHAT_LOG)?;
+        Some(crate::ui::shell::geom::room_chat_text_rect(
+            row,
+            log,
+            self.page.scale,
+        ))
     }
 }
 
@@ -733,6 +812,22 @@ mod tests {
 
     fn native() -> serde_json::Value {
         crate::test_fixture::json("tools/storage_oracle/lan_lobby.json").clone()
+    }
+
+    /// A touch platform moves the chat row beside VERA's send key and takes
+    /// the key's width out of the edit; the native layout keeps both places.
+    #[test]
+    fn touch_send_moves_the_lobby_chat_row_and_narrows_its_edit() {
+        let native = LanLobbyLayout::new(800, 600, crate::ui::shell::geom::RETAIL_SCALE)
+            .with_touch_send(false);
+        let touch = native.clone().with_touch_send(true);
+        let native_chat = native.chat_text().unwrap();
+        let touch_chat = touch.chat_text().unwrap();
+        let send = touch.chat_send().unwrap();
+        assert!(native.chat_send().is_none());
+        assert!(touch_chat.w < native_chat.w, "the edit leaves the key room");
+        assert!(touch_chat.y > native_chat.y, "the row takes the room's spacing");
+        assert!(send.x >= touch_chat.x + touch_chat.w, "the key follows the edit");
     }
 
     /// A press selects a player row (`0x0061AA3E`); a roster rebuild
@@ -898,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn name_input_takes_16_code_page_bytes_rejects_commas_and_keeps_literal_spaces() {
+    fn name_edit_drops_units_from_0x100_takes_16_bytes_rejects_commas_and_keeps_spaces() {
         let (mut controller, _) = bb();
         let mut lobby = LanLobbyState::new("");
         controller.set_text(PAGE.dialog, NAME, "");
@@ -909,8 +1004,9 @@ mod tests {
             None,
         );
         assert_eq!(controller.focused_control(PAGE.dialog), Some(NAME));
-        type_text(&mut controller, &mut lobby, "  A,é€B");
-        assert_eq!(controller.text(PAGE.dialog, NAME), "Aé€B");
+        // Latin-1 gets in; Chinese, an emoji and `€` (U+20AC) stay out, no `?`.
+        type_text(&mut controller, &mut lobby, "  A,é€玩😀B");
+        assert_eq!(controller.text(PAGE.dialog, NAME), "AéB");
         type_text(&mut controller, &mut lobby, "12345678901234567890");
         let saved = crate::util::native_string::acp_encode(&controller.text(PAGE.dialog, NAME));
         assert_eq!(saved.len(), 16);

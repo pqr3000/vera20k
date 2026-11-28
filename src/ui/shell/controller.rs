@@ -101,7 +101,10 @@ pub struct DialogController {
 
 impl Default for DialogController {
     fn default() -> Self {
-        let mut gui = Gui::new(4096);
+        // A limit, not an allocation: the match's chrome layer holds the
+        // sidebar's and the command bar's pictures too (a tall screen's
+        // power bar and cameo rows are hundreds).
+        let mut gui = Gui::new(16384);
         gui.set_base_scale(crate::ui::shell::geom::RETAIL_SCALE);
         let (time, width, height) = host_double_click_limits();
         gui.set_double_click(time.as_millis() as u64, width, height);
@@ -300,9 +303,37 @@ impl DialogController {
         if self.stack.is_empty() {
             return false;
         }
+        let down = matches!(event, InputEvent::PointerDown { .. });
         let consumed = self.gui.input(event, self.now()).consumed;
         self.collect();
+        if down {
+            self.note_edit_press();
+        }
         consumed
+    }
+
+    /// A pointer message for the chrome layer under the stack, with the
+    /// chrome's events: none while a dialog is up, which owns the pointer.
+    pub fn chrome_input(&mut self, event: InputEvent) -> Option<(vera20k_gui::InputResult, Vec<UiEvent>)> {
+        if !self.stack.is_empty() || self.gui.chrome().is_none() {
+            return None;
+        }
+        let result = self.gui.input(event, self.now());
+        Some((result, self.gui.drain_events()))
+    }
+
+    /// Android: a press that lands on an `Edit` arms the soft keyboard
+    /// (`app::input::ime`, `util::android_ime`), keyed by this dialog. The pages
+    /// focus their edits when they open, so only a tap should bring the
+    /// keyboard up over them.
+    fn note_edit_press(&self) {
+        #[cfg(target_os = "android")]
+        if self.gui.pressed_edit()
+            && let Some(dialog) = self.top_id()
+        {
+            crate::util::android_ime::arm(dialog.0);
+            crate::util::android_ime::request_show();
+        }
     }
 
     /// Widget timers (list scroll repeat); the next deadline.
@@ -327,7 +358,23 @@ impl DialogController {
         vera20k_gui::append_events(&mut self.pending, self.gui.drain_events());
     }
 
-    /// Clear the stack and make `id` the sole active dialog (a shell transition).
+    /// Closes every dialog, the overlays too, and lets go of the pointer:
+    /// the controller as a new one, but for the chrome layer under the
+    /// dialogs, which stays with its nodes (the match's sidebar and command
+    /// bar through the in-game menus).
+    pub fn close_all(&mut self) {
+        while let Some(inst) = self.stack.pop() {
+            let _ = self.gui.pop_dialog(inst.dialog);
+        }
+        self.pending.clear();
+        let _ = self.gui.drain_events();
+        if let Some(chrome) = self.gui.chrome() {
+            self.gui.drop_pointer_in(chrome);
+        }
+    }
+
+    /// Clear the stack and make `id` the sole active dialog (a shell
+    /// transition); the chrome layer stays.
     pub fn reset_to(&mut self, id: DialogResourceId) {
         while self.pop().is_some() {}
         self.pending.clear();
@@ -394,8 +441,12 @@ impl DialogController {
     /// A pointer message for the widgets, while a screen dialog is up.
     fn pointer(&mut self, event: InputEvent) {
         if self.base().is_some() {
+            let down = matches!(event, InputEvent::PointerDown { .. });
             self.gui.input(event, self.now());
             self.collect();
+            if down {
+                self.note_edit_press();
+            }
         }
     }
 
@@ -445,6 +496,26 @@ mod tests {
         assert!(c.gui.tree().kind(edit).is_ok(), "the overlay kept its widgets");
         c.close(page);
         assert_eq!((c.top_id(), c.root_in(page)), (Some(B), None));
+    }
+
+    /// The in-game menus' reset closes their dialogs and keeps the match's
+    /// chrome with its nodes, so a frame after it draws the same sidebar.
+    #[test]
+    fn resets_keep_the_chrome_layer() {
+        let mut c = DialogController::default();
+        let root = c.gui.create(NodeKind::Dialog, None).unwrap();
+        let chrome = c.gui.push_chrome(root, 1024 * 768).unwrap();
+        let button = c.gui.create(NodeKind::Button, Some(root)).unwrap();
+        c.ensure_active(A);
+        c.push_overlay(B);
+        c.close_all();
+        assert_eq!((c.top_id(), c.overlay_id()), (None, None));
+        assert_eq!(c.gui.chrome(), Some(chrome));
+        assert!(c.gui.tree().kind(button).is_ok());
+        c.reset_to(A);
+        c.ensure_active(B);
+        assert_eq!(c.gui.chrome(), Some(chrome));
+        assert!(c.gui.tree().kind(button).is_ok());
     }
 
     #[test]

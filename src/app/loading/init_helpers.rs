@@ -254,10 +254,36 @@ pub(crate) fn build_tile_atlas(
             needed.len() - before,
         );
     }
+    // The Firestorm ice chain cracks, breaks and regrows any of its three
+    // families' tiles (docs/ts-ice.md).
+    if !grid.ice_tiles.is_empty() {
+        let before = needed.len();
+        for &tile_id in &grid.ice_tiles {
+            if let Err(error) =
+                theater::inject_template_tiles(&mut needed, tile_id, lookup, asset_manager)
+            {
+                log::debug!("Ice tile_id {tile_id} not pre-loaded: {error}");
+            }
+        }
+        log::info!(
+            "Atlas pre-load: injected {} ice TileKeys",
+            needed.len() - before,
+        );
+    }
     log::info!("Map uses {} unique tile keys", needed.len());
 
     let images: HashMap<TileKey, TileImage> =
         theater::load_tile_images(asset_manager, lookup, palette, &needed);
+    // VERA's HD art terrain collection: every tile of the theater, not only
+    // the map's, for the offline upscaler (`render::hd_terrain`).
+    if std::env::var_os("VERA20K_HD_DUMP_TERRAIN").is_some() {
+        let mut all: HashSet<TileKey> = HashSet::new();
+        for tile_id in 0..lookup.len().min(usize::from(u16::MAX)) {
+            let _ = theater::inject_template_tiles(&mut all, tile_id as u16, lookup, asset_manager);
+        }
+        let every = theater::load_tile_images(asset_manager, lookup, palette, &all);
+        crate::render::hd_terrain::dump_tiles(every.values());
+    }
     if images.is_empty() {
         log::warn!("No tile images loaded — falling back to single tile");
         return None;
@@ -342,6 +368,9 @@ pub(crate) fn bind_rules_art_metadata(
 ) {
     // ARTMD is read the way the game's Rules were (`ares_switch::ares_way`).
     let _ares_way = crate::rules::ares_switch::read_ares_way(rules.reads_ares_way());
+    // This load's art problems, shown once its match has loaded
+    // (`input::messages::post_art_problems`), start here.
+    crate::rules::art_problems::begin();
     rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(fixed_art));
     let (populated, fallback) = rules.populate_anim_frame_dims(assets, theater_ext, theater_name);
     log::info!("Anim frame dims: {populated} populated, {fallback} fallback (defaults to 30x30)");
@@ -488,9 +517,10 @@ pub(crate) fn prepare_presentation_manifest(
     // drawn the first time a frame shows it.
     let mut unit_atlas = None;
     if palette.is_some() {
-        unit_atlas::admit_world_models(
+        unit_atlas::admit_world_and_image_models(
             &mut unit_atlas,
             sim.entities(),
+            sim.ext_module_images(),
             asset_manager,
             rules,
             Some(sim.interner()),
@@ -635,6 +665,7 @@ pub(crate) fn finish_presentation_assets(
             crate::app::match_runtime::state::scenario_local_owner(simulation),
             rules.ares(),
         ),
+        match_layout_ini.as_ref(),
     )?;
     // `Game_LoadUI_LoadSideData` (0x1002F4A0) hands the local side's
     // `GraphicalText.Image=` / `.Palette=` to the overlay slot writer at
@@ -703,9 +734,15 @@ pub(crate) fn finish_presentation_assets(
             batch,
             asset_manager,
             rules.ares_mouse_cursors(),
+            crate::render::interface_picture::PictureSizes::Art(rules.art()),
         )
     } else {
-        crate::render::cursor_atlas::build_software_cursor(gpu, batch, asset_manager)
+        crate::render::cursor_atlas::build_software_cursor(
+            gpu,
+            batch,
+            asset_manager,
+            crate::render::interface_picture::PictureSizes::Art(rules.art()),
+        )
     };
     if software_cursor.is_some() {
         log::info!("Software cursor loaded from mouse.sha — OS cursor will be hidden");
@@ -765,6 +802,10 @@ fn voxel_palette_demand(
     use crate::rules::house_colors::HouseColorIndex;
     let mut colors: Vec<_> = house_colors.values().copied().collect();
     if let Some(rules) = rules {
+        // The team-colour view (Alt+T) paints enemy houses in colours no
+        // active house carries, so their ramp rows must be uploaded up front
+        // like the relation bands' are.
+        colors.extend(rules.enemy_team_palette.entries().iter().copied());
         colors.extend(
             rules
                 .projectiles_iter()

@@ -8,11 +8,11 @@
 //! owns the render pass, the camera, the buffers, and the parent-compose order:
 //! it submits the buffers this pass returns in the verified C8 sequence.
 //!
-//! Slice 5 adds `paint_modal_shp`: the shared mode-2 SHP modal emitter (PUDLGBGN
-//! frame 0 background + MNBTTN owner-draw type-3 button + body/OK labels). It is
+//! Slice 5 adds `paint_modal_sprites`: the shared mode-2 SHP modal emitter
+//! (PUDLGBGN frame 0 background + MNBTTN owner-draw type-3 buttons). It is
 //! source-atlas-neutral — the caller passes the resolved chrome entries (the modal
-//! art lives in the skirmish chrome atlas today) so the emitter stays a pure
-//! composition the quit-confirm and validation modals both delegate to.
+//! art lives in the skirmish chrome atlas today). The boxes' texts are their
+//! widgets' (`app::frontend::skirmish_shell_render::shell_box`).
 
 use std::borrow::Cow;
 
@@ -78,14 +78,36 @@ fn entry_sprite(
     size: [f32; 2],
     depth: f32,
 ) -> SpriteInstance {
-    SpriteInstance {
-        position: [x, y],
+    quad(
+        [x, y],
         size,
-        uv_origin: entry.uv_origin,
-        uv_size: entry.uv_size,
+        (entry.uv_origin, entry.uv_size),
+        [1.0; 3],
+        1.0,
         depth,
-        tint: [1.0, 1.0, 1.0],
-        alpha: 1.0,
+    )
+}
+
+/// One quad on the target: `size` pixels from `position`, sampling `uv`
+/// (origin, size) in `tint` and `alpha` at `depth`. Every shell skin's
+/// picture and solid fill (a white texel) is one, and so is each of the
+/// HUD paint's fills and pictures (`HudPaint::build`).
+pub fn quad(
+    position: [f32; 2],
+    size: [f32; 2],
+    (uv_origin, uv_size): ([f32; 2], [f32; 2]),
+    tint: [f32; 3],
+    alpha: f32,
+    depth: f32,
+) -> SpriteInstance {
+    SpriteInstance {
+        position,
+        size,
+        uv_origin,
+        uv_size,
+        depth,
+        tint,
+        alpha,
         ..Default::default()
     }
 }
@@ -136,16 +158,18 @@ pub fn push_tinted_entry(
     tint: [f32; 3],
     depth: f32,
 ) {
-    out.push(SpriteInstance {
+    let (position, size) = (
+        [rect.x as f32, rect.y as f32],
+        [rect.w as f32, rect.h as f32],
+    );
+    out.push(quad(
+        position,
+        size,
+        (entry.uv_origin, entry.uv_size),
         tint,
-        ..entry_sprite(
-            entry,
-            rect.x as f32,
-            rect.y as f32,
-            [rect.w as f32, rect.h as f32],
-            depth,
-        )
-    });
+        1.0,
+        depth,
+    ));
 }
 
 /// One chrome atlas entry at its native size, top-left at `(x, y)`.
@@ -673,7 +697,8 @@ fn paint_scaled_warning_monitor(
         return paint_kind4_static(entry, monitor, scale);
     }
     let native_window = scale.base_rect(monitor);
-    let mut sprite = paint_kind4_static(entry, native_window, crate::ui::shell::geom::RETAIL_SCALE)?;
+    let mut sprite =
+        paint_kind4_static(entry, native_window, crate::ui::shell::geom::RETAIL_SCALE)?;
     let drawn = scale.scale_rect(RectPx::new(
         sprite.position[0] as i32,
         sprite.position[1] as i32,
@@ -881,23 +906,6 @@ pub fn paint_modal_sprites(
     out
 }
 
-/// Compose the full mode-2 SHP modal: [`paint_modal_sprites`] plus the body/button
-/// labels at the modal's front-most text depth, all using the layout's scale.
-pub fn paint_modal_shp(
-    font: &BitFont,
-    background: Option<SkirmishShellChromeEntry>,
-    button_frames: ModalButtonFrames,
-    dialog: RectPx,
-    buttons: &[ModalButton],
-    labels: &[PaintLabel<'_>],
-    scale: ShellScale,
-    depths: ModalDepths,
-) -> ModalDraw {
-    let sprites = paint_modal_sprites(background, button_frames, dialog, buttons, scale, depths);
-    let text = paint_labels_at_depth_scaled(font, labels, depths.text, scale.factor());
-    ModalDraw { sprites, text }
-}
-
 /// Center the button art, grown by `scale`, on its control rect (matches the
 /// existing modal button placement: integer-halved gaps on each axis).
 fn modal_button_centered_position(
@@ -991,7 +999,9 @@ mod tests {
         // zero, y half-gap is one (0x0061595E..0x0061597E).
         let window = RectPx::new(670, 47, 93, 55);
         let entry = fake_entry(92.0, 53.0);
-        let retail = paint_scaled_warning_monitor(entry, window, crate::ui::shell::geom::RETAIL_SCALE).unwrap();
+        let retail =
+            paint_scaled_warning_monitor(entry, window, crate::ui::shell::geom::RETAIL_SCALE)
+                .unwrap();
         assert_eq!(retail.position, [670.0, 48.0]);
         let scale = crate::ui::shell::geom::shell_scale(1600, 1200);
         let scaled = paint_scaled_warning_monitor(entry, scale.scale_rect(window), scale).unwrap();
@@ -1002,9 +1012,12 @@ mod tests {
     #[test]
     fn warning_monitor_preserves_retail_640_and_downscaled_placement() {
         let entry = fake_entry(92.0, 53.0);
-        let retail =
-            paint_scaled_warning_monitor(entry, RectPx::new(510, 47, 93, 55), crate::ui::shell::geom::RETAIL_SCALE)
-                .unwrap();
+        let retail = paint_scaled_warning_monitor(
+            entry,
+            RectPx::new(510, 47, 93, 55),
+            crate::ui::shell::geom::RETAIL_SCALE,
+        )
+        .unwrap();
         assert_eq!(retail.position, [510.0, 48.0]);
         let scale = crate::ui::shell::geom::shell_scale(400, 300);
         let window = scale.scale_rect(RectPx::new(670, 47, 93, 55));
@@ -1030,13 +1043,18 @@ mod tests {
     fn warning_monitor_shape_follows_the_layout_scale() {
         let entry = fake_entry(62.0, 44.0);
         let window = RectPx::new(640, 30, 200, 200);
-        let retail = paint_kind4_static(entry, window, crate::ui::shell::geom::RETAIL_SCALE).expect("shape");
+        let retail =
+            paint_kind4_static(entry, window, crate::ui::shell::geom::RETAIL_SCALE).expect("shape");
         assert_eq!(retail.size, [62.0, 44.0]);
         // Integer-halved gaps: (200-62)/2 right, (200-44)/2 down.
         assert_eq!(retail.position, [709.0, 108.0]);
 
-        let stretched =
-            paint_kind4_static(entry, window, crate::ui::shell::geom::shell_scale(1600, 1200)).expect("shape");
+        let stretched = paint_kind4_static(
+            entry,
+            window,
+            crate::ui::shell::geom::shell_scale(1600, 1200),
+        )
+        .expect("shape");
         // 2x on both axes, then re-centred in the same window.
         assert_eq!(stretched.size, [124.0, 88.0]);
         assert_eq!(stretched.position, [678.0, 86.0]);
@@ -1056,8 +1074,12 @@ mod tests {
         // 0x00608500 sizes the 0x72B window to the SCRA frame exactly, so the
         // kind-4 draw fills it without centering or clipping.
         assert_eq!(window, RectPx::new(104, 142, 424, 220));
-        let sprite = paint_kind4_static(fake_entry(424.0, 220.0), window, crate::ui::shell::geom::RETAIL_SCALE)
-            .expect("kind-4 SCRA frame");
+        let sprite = paint_kind4_static(
+            fake_entry(424.0, 220.0),
+            window,
+            crate::ui::shell::geom::RETAIL_SCALE,
+        )
+        .expect("kind-4 SCRA frame");
 
         assert_eq!(sprite.position, [104.0, 142.0]);
         assert_eq!(sprite.size, [424.0, 220.0]);
@@ -1087,22 +1109,24 @@ mod tests {
         let font = crate::render::bit_font::tests::make_test_font(&[(b'A' as u16, 6)], 4);
         let draw = |scale: ShellScale| {
             let rect = scale.scale_rect(RectPx::new(175, 137, 451, 326));
-            paint_modal_shp(
-                &font,
+            let sprites = paint_modal_sprites(
                 Some(fake_skirmish_entry([0.0; 2], [1.0; 2], [451.0, 326.0])),
                 ModalButtonFrames::default(),
                 rect,
                 &[],
-                &[PaintLabel {
-                    text: "A".into(),
-                    rect,
-                    align: ShellAlign::NONE,
-                    rgb: SHELL_TEXT_RGB_ENABLED,
-                    path_a_reveal: None,
-                }],
                 scale,
                 MODAL_DEPTHS,
-            )
+            );
+            let label = PaintLabel {
+                text: "A".into(),
+                rect,
+                align: ShellAlign::NONE,
+                rgb: SHELL_TEXT_RGB_ENABLED,
+                path_a_reveal: None,
+            };
+            let text =
+                paint_labels_at_depth_scaled(&font, &[label], MODAL_DEPTHS.text, scale.factor());
+            ModalDraw { sprites, text }
         };
         let retail = draw(crate::ui::shell::geom::RETAIL_SCALE);
         let fitted = draw(crate::ui::shell::geom::shell_scale(1600, 1200));

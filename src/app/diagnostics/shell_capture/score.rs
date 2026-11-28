@@ -19,6 +19,29 @@ use serde_json::{Value, json};
 /// Frames to present once the target state is reached.
 const SETTLE_FRAMES: u32 = 4;
 
+/// The SCRA frame the steady `0x103` capture shows. The emblem animates on a
+/// 100 ms wall-clock timer that keeps running once the statics settle (frame 4
+/// at about 1020 ms after the page opens, frame 5 at about 1055 ms), so a
+/// still taken a fixed number of frames after the settle shows frame 4 or 5
+/// by timing alone. The capture waits for this frame, the one the baseline
+/// stills show.
+const STEADY_SCRA_FRAME: usize = 5;
+
+/// Whether the rendered SCRA `frame` is the steady still's
+/// ([`STEADY_SCRA_FRAME`]); a page without SCRA art has no frame to wait for.
+/// A frame past it cannot come back (the wrap selects frame 29), so the
+/// capture fails rather than show another frame.
+fn steady_scra_frame_ready(frame: Option<usize>) -> Result<bool> {
+    match frame {
+        None => Ok(true),
+        Some(frame) if frame < STEADY_SCRA_FRAME => Ok(false),
+        Some(STEADY_SCRA_FRAME) => Ok(true),
+        Some(frame) => bail!(
+            "campaign score capture settled after SCRA frame {STEADY_SCRA_FRAME} (now {frame})"
+        ),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ScoreTarget {
     /// Settled with every reveal finished, the pointer at the neutral point.
@@ -168,10 +191,19 @@ impl CampaignScoreCapture {
 
         if self.phase == CampaignScorePhase::MainMenu {
             if rendered == PresentedShell::MainMenu
-                && steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(state))?
+                && steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(
+                    &state.platform,
+                    &state.renderer,
+                    &state.frontend,
+                    &state.match_state,
+                    &state.persistence,
+                ))?
             {
                 App::open_campaign_score_page(
-                    state,
+                    &state.renderer,
+                    &mut state.frontend,
+                    &state.process_assets,
+                    &mut state.audio,
                     synthetic_campaign_score_model(),
                     "Synthetic campaign score capture".into(),
                     "Synthetic UI fixture; not native-parity evidence.".into(),
@@ -192,7 +224,7 @@ impl CampaignScoreCapture {
             "campaign capture did not render the production score page"
         );
         ensure!(
-            App::campaign_score_shell_active(state),
+            App::campaign_score_shell_active(&state.frontend),
             "campaign score capture left the 0x103 page"
         );
         if self.phase == CampaignScorePhase::CampaignScore
@@ -222,10 +254,19 @@ impl CampaignScoreCapture {
         match animation.phase {
             CampaignAnimationPhase::MainMenu => {
                 if rendered == PresentedShell::MainMenu
-                    && steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(state))?
+                    && steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(
+                        &state.platform,
+                        &state.renderer,
+                        &state.frontend,
+                        &state.match_state,
+                        &state.persistence,
+                    ))?
                 {
                     App::open_campaign_score_page(
-                        state,
+                        &state.renderer,
+                        &mut state.frontend,
+                        &state.process_assets,
+                        &mut state.audio,
                         synthetic_campaign_score_model(),
                         "Synthetic campaign score animation capture".into(),
                         "Synthetic UI fixture; not native-parity evidence.".into(),
@@ -255,7 +296,8 @@ impl CampaignScoreCapture {
             | CampaignAnimationPhase::WaitingForFirstSample
             | CampaignAnimationPhase::WaitingForNextFrame => {
                 ensure!(
-                    rendered == PresentedShell::Score && App::campaign_score_shell_active(state),
+                    rendered == PresentedShell::Score
+                        && App::campaign_score_shell_active(&state.frontend),
                     "campaign animation sequence left the production 0x103 page"
                 );
                 if animation.phase == CampaignAnimationPhase::WaitingForFirstFrame
@@ -275,13 +317,14 @@ impl CampaignScoreCapture {
             }
             CampaignAnimationPhase::Continue => {
                 ensure!(
-                    rendered == PresentedShell::Score && App::campaign_score_shell_active(state),
+                    rendered == PresentedShell::Score
+                        && App::campaign_score_shell_active(&state.frontend),
                     "campaign Continue probe did not start on dialog 0x103"
                 );
                 click_campaign_continue(state)?;
                 ensure!(
                     crate::app::frontend::shell_transition::shell_exit_wave(
-                        state,
+                        &state.frontend.shell_exit,
                         crate::app::frontend::shell_transition::ShellSlideKind::CampaignScore,
                     )
                     .is_some(),
@@ -303,7 +346,10 @@ impl CampaignScoreCapture {
                         "campaign score page or art survived the Continue close"
                     );
                     App::open_campaign_score_page(
-                        state,
+                        &state.renderer,
+                        &mut state.frontend,
+                        &state.process_assets,
+                        &mut state.audio,
                         synthetic_campaign_score_model(),
                         "Synthetic campaign score animation reopen".into(),
                         "Synthetic UI fixture; not native-parity evidence.".into(),
@@ -329,7 +375,8 @@ impl CampaignScoreCapture {
             }
             CampaignAnimationPhase::WaitingForReopenedFrame => {
                 ensure!(
-                    rendered == PresentedShell::Score && App::campaign_score_shell_active(state),
+                    rendered == PresentedShell::Score
+                        && App::campaign_score_shell_active(&state.frontend),
                     "campaign animation reopen did not render dialog 0x103"
                 );
             }
@@ -340,7 +387,8 @@ impl CampaignScoreCapture {
 
     pub(super) fn should_capture_animation_frame(
         &mut self,
-        state: &AppState,
+        gpu: &GpuContext,
+        frontend: &FrontendState,
         rendered: PresentedShell,
         frame: u32,
     ) -> Result<bool> {
@@ -353,8 +401,7 @@ impl CampaignScoreCapture {
         );
         let (label, epoch) = match animation.phase {
             CampaignAnimationPhase::WaitingForFirstSample => {
-                if !state
-                    .frontend
+                if !frontend
                     .campaign_score_page
                     .as_ref()
                     .is_some_and(|page| page.statics.is_terminal())
@@ -372,11 +419,10 @@ impl CampaignScoreCapture {
             _ => return Ok(false),
         };
         ensure!(
-            rendered == PresentedShell::Score && App::campaign_score_shell_active(state),
+            rendered == PresentedShell::Score && App::campaign_score_shell_active(frontend),
             "campaign animation sample was requested outside rendered dialog 0x103"
         );
-        let Some(emblem_frame) = state
-            .frontend
+        let Some(emblem_frame) = frontend
             .campaign_score_page
             .as_ref()
             .and_then(|page| page.emblem_animation_frame())
@@ -402,7 +448,7 @@ impl CampaignScoreCapture {
         }
         let epoch = epoch.context("campaign animation sample has no page epoch")?;
         let elapsed_ms = Instant::now().saturating_duration_since(epoch).as_millis();
-        let layout = campaign_score_layout(state);
+        let layout = campaign_score_layout(gpu, &frontend.campaign_score_page);
         let roi = layout
             .control_rect(SCORE_ART_REGION_STATIC)
             .context("campaign score layout has no SCRA control ROI")?;
@@ -418,7 +464,7 @@ impl CampaignScoreCapture {
 
     pub(super) fn record_animation_sample(
         &mut self,
-        state: &AppState,
+        frontend: &FrontendState,
         width: u32,
         height: u32,
         pixels: &[u8],
@@ -432,7 +478,7 @@ impl CampaignScoreCapture {
             .take()
             .context("campaign animation readback has no post-render snapshot")?;
         ensure!(
-            App::campaign_score_shell_active(state),
+            App::campaign_score_shell_active(frontend),
             "campaign score page closed before its sample readback completed"
         );
         let roi_pixels = crop_bgra_roi(pixels, width, height, pending.roi)?;
@@ -573,21 +619,31 @@ impl CampaignScoreCapture {
             .collect()
     }
 
-    pub(super) fn ready(&self, state: &AppState) -> Result<bool> {
+    /// The steady still is selected after the production renderer has polled
+    /// and drawn its SCRA frame, so the frame read back is the one checked:
+    /// settled, on [`STEADY_SCRA_FRAME`].
+    pub(super) fn should_capture_steady_frame(&self, frontend: &FrontendState) -> Result<bool> {
+        if !self.ready(frontend)? {
+            return Ok(false);
+        }
+        let page = frontend.campaign_score_page.as_ref();
+        steady_scra_frame_ready(page.and_then(|page| page.emblem_animation_frame()))
+    }
+
+    pub(super) fn ready(&self, frontend: &FrontendState) -> Result<bool> {
         if self.phase != CampaignScorePhase::Settling(0) {
             return Ok(false);
         }
         ensure!(
-            App::campaign_score_shell_active(state),
+            App::campaign_score_shell_active(frontend),
             "campaign score capture left the 0x103 page"
         );
         ensure!(
-            state.frontend.shell_controller.top_id()
+            frontend.shell_controller.top_id()
                 == Some(crate::ui::campaign_score_shell::CAMPAIGN_SCORE_DIALOG),
             "campaign score capture lost dialog 0x103"
         );
-        Ok(state
-            .frontend
+        Ok(frontend
             .campaign_score_page
             .as_ref()
             .is_some_and(|page| page.statics.is_terminal()))
@@ -628,17 +684,20 @@ impl CampaignScoreCapture {
     }
 }
 
-fn campaign_score_layout(state: &AppState) -> CampaignScoreLayout {
-    let (width, height) = crate::app::frontend::shell_layout::shell_screen_size(state);
-    let fills_window = crate::app::frontend::shell_layout::fills_window(state);
-    state.frontend.campaign_score_page.as_ref().map_or_else(
+fn campaign_score_layout(
+    gpu: &GpuContext,
+    campaign_score_page: &Option<CampaignScorePage>,
+) -> CampaignScoreLayout {
+    let (width, height) = crate::app::frontend::shell_layout::shell_screen_size(gpu);
+    let fills_window = crate::app::frontend::shell_layout::fills_window(gpu);
+    campaign_score_page.as_ref().map_or_else(
         || CampaignScoreLayout::compute(Default::default(), width, height, 0),
         |page| page.layout(width, height, fills_window),
     )
 }
 
 pub(super) fn click_campaign_continue(state: &mut AppState) -> Result<()> {
-    let layout = campaign_score_layout(state);
+    let layout = campaign_score_layout(&state.renderer.gpu, &state.frontend.campaign_score_page);
     let button = layout
         .page
         .buttons
@@ -659,7 +718,7 @@ pub(super) fn click_campaign_continue(state: &mut AppState) -> Result<()> {
     App::handle_campaign_score_mouse(state, Some(false));
     ensure!(
         crate::app::frontend::shell_transition::shell_exit_wave(
-            state,
+            &state.frontend.shell_exit,
             crate::app::frontend::shell_transition::ShellSlideKind::CampaignScore,
         )
         .is_some(),
@@ -710,8 +769,13 @@ fn changed_bgra_pixel_count(before: &[u8], after: &[u8]) -> Result<usize> {
 }
 
 /// The retail comparison game's page: a loss on DC Uprising, 800x600.
-fn comparison_model(state: &AppState) -> Result<ScoreScreenModel> {
-    let rules = state.rules().context("score capture needs the rules")?;
+fn comparison_model(
+    frontend: &FrontendState,
+    match_state: &MatchState,
+    process_assets: &ProcessAssets,
+) -> Result<ScoreScreenModel> {
+    let rules = crate::app::state::active_rules(frontend, match_state)
+        .context("score capture needs the rules")?;
     let color = |name: &str| -> Result<[u8; 3]> {
         let entry = crate::rules::color_scheme::scheme_entry_by_name(&rules.color_schemes, name)
             .with_context(|| format!("[Colors] has no {name}"))?;
@@ -720,7 +784,7 @@ fn comparison_model(state: &AppState) -> Result<ScoreScreenModel> {
             crate::rules::house_colors::HouseColorIndex(entry as u8),
         ))
     };
-    let computer = state.csf_text("TXT_COMPUTER");
+    let computer = process_assets.csf_text("TXT_COMPUTER");
     Ok(ScoreScreenModel {
         title_key: "GUI:SkirmishScore",
         game_number: 1,
@@ -750,11 +814,10 @@ fn comparison_model(state: &AppState) -> Result<ScoreScreenModel> {
 }
 
 /// Every kind-1 static of the page has run its reveal to the end.
-pub(super) fn reveals_settled(state: &AppState) -> bool {
-    state.frontend.shell_page_title.is_terminal()
-        && state.frontend.shell_status_line.is_terminal()
-        && state
-            .frontend
+pub(super) fn reveals_settled(frontend: &FrontendState) -> bool {
+    frontend.shell_page_title.is_terminal()
+        && frontend.shell_status_line.is_terminal()
+        && frontend
             .score_page
             .as_ref()
             .is_some_and(|page| page.statics.is_terminal())
@@ -769,9 +832,9 @@ impl ScoreCapture {
         }
     }
 
-    fn set_pointer(state: &mut AppState, point: (i32, i32)) {
-        state.match_state.input.cursor_x = point.0 as f32;
-        state.match_state.input.cursor_y = point.1 as f32;
+    fn set_pointer(input: &mut MatchInputState, point: (i32, i32)) {
+        input.cursor_x = point.0 as f32;
+        input.cursor_y = point.1 as f32;
     }
 
     pub(super) fn after_present(
@@ -782,10 +845,24 @@ impl ScoreCapture {
     ) -> Result<()> {
         if self.phase == Phase::MainMenu {
             if rendered == PresentedShell::MainMenu
-                && steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(state))?
+                && steady_main_menu_capture_ready(MainMenuCaptureSnapshot::from_state(
+                    &state.platform,
+                    &state.renderer,
+                    &state.frontend,
+                    &state.match_state,
+                    &state.persistence,
+                ))?
             {
-                let model = comparison_model(state)?;
-                App::open_score_page(state, model, String::new(), String::new());
+                let model =
+                    comparison_model(&state.frontend, &state.match_state, &state.process_assets)?;
+                App::open_score_page(
+                    &state.renderer,
+                    &mut state.frontend,
+                    &state.process_assets,
+                    model,
+                    String::new(),
+                    String::new(),
+                );
                 self.route
                     .push(json!({"dialog": 0x108, "frame": frame, "action": "open"}));
                 self.phase = Phase::Score;
@@ -793,7 +870,7 @@ impl ScoreCapture {
             return Ok(());
         }
         ensure!(
-            App::score_shell_active(state),
+            App::score_shell_active(&state.frontend),
             "score capture left the score page"
         );
         let entry_tick = state
@@ -817,24 +894,27 @@ impl ScoreCapture {
                         }
                     }
                 }
-                _ if entry_tick.is_some() || !reveals_settled(state) => {}
+                _ if entry_tick.is_some() || !reveals_settled(&state.frontend) => {}
                 ScoreTarget::Steady => self.phase = Phase::Settling(SETTLE_FRAMES),
                 ScoreTarget::HoverContinue | ScoreTarget::LeaveContinue => {
-                    Self::set_pointer(state, CONTINUE_POINT);
+                    Self::set_pointer(&mut state.match_state.input, CONTINUE_POINT);
                     App::handle_score_shell_mouse(state, None);
                     self.route.push(json!({"dialog": 0x108, "frame": frame,
                         "action": "hover Continue"}));
                     self.phase = Phase::Hover;
                 }
                 ScoreTarget::SlideOut(_) => {
-                    Self::set_pointer(state, CONTINUE_POINT);
+                    Self::set_pointer(&mut state.match_state.input, CONTINUE_POINT);
                     App::handle_score_shell_mouse(state, None);
                     App::handle_score_shell_mouse(state, Some(true));
                     App::handle_score_shell_mouse(state, Some(false));
-                    Self::set_pointer(state, (EXPECTED_CURSOR_X as i32, EXPECTED_CURSOR_Y as i32));
+                    Self::set_pointer(
+                        &mut state.match_state.input,
+                        (EXPECTED_CURSOR_X as i32, EXPECTED_CURSOR_Y as i32),
+                    );
                     ensure!(
                         crate::app::frontend::shell_transition::shell_exit_wave(
-                            state,
+                            &state.frontend.shell_exit,
                             ShellSlideKind::Score
                         )
                         .is_some(),
@@ -847,7 +927,7 @@ impl ScoreCapture {
             },
             Phase::Hover if state.frontend.shell_status_line.is_terminal() => {
                 if self.target == ScoreTarget::LeaveContinue {
-                    Self::set_pointer(state, ART_POINT);
+                    Self::set_pointer(&mut state.match_state.input, ART_POINT);
                     App::handle_score_shell_mouse(state, None);
                     self.route.push(json!({"dialog": 0x108, "frame": frame,
                         "action": "move onto the art", "point": [ART_POINT.0, ART_POINT.1]}));
@@ -864,14 +944,16 @@ impl ScoreCapture {
                     bail!("only the slide-out target leaves the page");
                 };
                 let tick = crate::app::frontend::shell_transition::shell_exit_wave(
-                    state,
+                    &state.frontend.shell_exit,
                     ShellSlideKind::Score,
                 )
                 .map(|wave| wave.tick())
                 .context("the 0x108 teardown slide ended before its held tick")?;
                 ensure!(tick <= target, "teardown slide passed tick {target}");
                 if tick == target {
-                    crate::app::frontend::shell_transition::hold_shell_exit_for_capture(state);
+                    crate::app::frontend::shell_transition::hold_shell_exit_for_capture(
+                        &mut state.frontend.shell_exit,
+                    );
                     self.route.push(json!({"dialog": 0x108, "frame": frame,
                         "action": "hold teardown slide", "tick": tick}));
                     self.phase = Phase::Settling(SETTLE_FRAMES);
@@ -885,20 +967,20 @@ impl ScoreCapture {
         Ok(())
     }
 
-    pub(super) fn ready(&self, state: &AppState) -> Result<bool> {
+    pub(super) fn ready(&self, frontend: &FrontendState) -> Result<bool> {
         if self.phase != Phase::Settling(0) {
             return Ok(false);
         }
         ensure!(
-            App::score_shell_active(state),
+            App::score_shell_active(frontend),
             "score capture left the score page"
         );
         Ok(match self.target {
             ScoreTarget::Entry(_) | ScoreTarget::SlideOut(_) => true,
             ScoreTarget::Steady | ScoreTarget::HoverContinue | ScoreTarget::LeaveContinue => {
-                state.frontend.shell_first_paint_slide.is_none()
-                    && state.frontend.shell_exit.is_none()
-                    && reveals_settled(state)
+                frontend.shell_first_paint_slide.is_none()
+                    && frontend.shell_exit.is_none()
+                    && reveals_settled(frontend)
             }
         })
     }
@@ -922,5 +1004,22 @@ impl ScoreCapture {
             "frame": {"path": FRAME_FILE_NAME, "byte_length": pixels.len(),
                 "sha256": crate::util::sha256::sha256_hex(pixels)}
         })
+    }
+}
+
+#[cfg(all(test, tests_app))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steady_campaign_still_waits_for_its_scra_frame() {
+        // Settled on frame 4 the still waits; on frame 5 it is taken.
+        assert!(!steady_scra_frame_ready(Some(4)).expect("before"));
+        assert!(steady_scra_frame_ready(Some(STEADY_SCRA_FRAME)).expect("on"));
+        // Past it (or wrapped to 29) no later frame matches the baseline.
+        assert!(steady_scra_frame_ready(Some(6)).is_err());
+        assert!(steady_scra_frame_ready(Some(29)).is_err());
+        // Without SCRA art nothing animates.
+        assert!(steady_scra_frame_ready(None).expect("no art"));
     }
 }

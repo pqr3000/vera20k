@@ -2,26 +2,34 @@
 //! left-release decision (`LeftRelease`, berserk selections) it dispatches on.
 
 use super::{
-    AttackAction, AttackDispatch, BuildingClick, InfantryC4Action, ObjectKeyAction, OrderModifier,
-    ares_head_hook_selection_click, ares_trench_enter, armed_action_with, attack_branch_orders,
-    building_click_orders, building_selection_click, cell_guard_area_action_with,
-    cell_harvest_order, cursor_owner, disarm_bomb_engineers, engineer_capture_orders, entry_orders,
-    finish_order, friendly_bomb_ivans, garrison_entry_orders, infantry_arm_attacks_with,
-    infantry_c4_action_with, infiltrator_capture_orders, locked_move_cells, lone_self_foot_release,
-    lone_self_healer_guard, move_click_command, object_action_answers_friendly,
-    object_attack_click_command_with, object_click_release, object_key_action_with,
-    object_key_target, projected_order_selection, push_move_flash, resolve_order_modifiers,
-    selection_can_attack_move, self_answers_no_deploy, self_click_command, self_detonates,
-    terrain_forced, unit_repair_branch_orders, vehicle_capture_action,
+    AttackAction, AttackDispatch, BuildingClick, FriendlyIvanAction, InfantryC4Action,
+    ObjectKeyAction, OrderModifier, ares_head_hook_selection_click, ares_trench_enter,
+    armed_action_with, attack_branch_orders, building_click_orders, building_selection_click,
+    cell_guard_area_action_with, cell_harvest_order, cursor_owner, disarm_bomb_engineers,
+    engineer_capture_orders, entry_orders, finish_order, friendly_ivans, garrison_entry_orders,
+    healer_terrain_key_order, infantry_arm_attacks_with, infantry_c4_action_with,
+    infiltrator_capture_orders, locked_move_cells, lone_self_foot_release, lone_self_healer_guard,
+    move_click_command, object_action_answers_friendly, object_attack_click_command_with,
+    object_click_release, object_key_action_with, object_key_target, projected_order_selection,
+    push_move_flash, resolve_order_modifiers, selection_can_attack_move, self_answers_no_deploy,
+    self_click_command, self_detonates, terrain_forced, unit_repair_branch_orders,
+    vehicle_capture_action,
 };
-use crate::app::AppState;
+use crate::app::PlatformState;
+use crate::app::diagnostics::state::DiagnosticsState;
+use crate::app::frontend::state::FrontendState;
 use crate::app::input::commands::preferred_local_owner;
 use crate::app::input::dispatch::{
     is_alt_held, is_ctrl_held, is_shift_held, selected_stable_ids_in_order,
 };
 use crate::app::input::entity_pick::{HoverObject, HoverTargetKindWithId, hover_object_at_point};
 use crate::app::match_runtime::sim_host::SimWrite;
+use crate::app::match_runtime::state::MatchState;
+use crate::app::persistence::PersistenceState;
+use crate::app::process_assets::ProcessAssets;
+use crate::app::renderer_state::RendererState;
 use crate::app::types::{HoverTargetKind, OrderMode};
+use crate::audio::sfx::SfxPlayer;
 use crate::map::entities::EntityCategory;
 use crate::sim::combat::TargetKind;
 use crate::sim::command::{Command, CommandEnvelope};
@@ -231,12 +239,31 @@ pub(crate) enum ContextClick {
 /// fall through to the selection so the caller can treat them as selection
 /// clicks instead.
 pub(crate) fn try_queue_context_order(
-    state: &mut AppState,
+    platform: &PlatformState,
+    renderer: &RendererState,
+    diag: &DiagnosticsState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    process_assets: &ProcessAssets,
+    sfx_player: &mut Option<SfxPlayer>,
+    persistence: &PersistenceState,
     target: ContextOrderTarget,
     select_friendly_clicks: bool,
 ) -> ContextClick {
     let mut selects = false;
-    if queue_context_order(state, target, select_friendly_clicks, &mut selects) {
+    if queue_context_order(
+        platform,
+        renderer,
+        diag,
+        frontend,
+        match_state,
+        process_assets,
+        sfx_player,
+        persistence,
+        target,
+        select_friendly_clicks,
+        &mut selects,
+    ) {
         ContextClick::Consumed
     } else if selects {
         ContextClick::Select
@@ -249,23 +276,30 @@ pub(crate) fn try_queue_context_order(
 /// `false` when the selection takes it, with `selects` set when DetermineAction
 /// answered Select or 0 ([`LeftRelease::Select`]).
 fn queue_context_order(
-    state: &mut AppState,
+    platform: &PlatformState,
+    renderer: &RendererState,
+    diag: &DiagnosticsState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    process_assets: &ProcessAssets,
+    sfx_player: &mut Option<SfxPlayer>,
+    persistence: &PersistenceState,
     target: ContextOrderTarget,
     select_friendly_clicks: bool,
     selects: &mut bool,
 ) -> bool {
-    if !state.match_state.sim_runtime.is_installed() {
+    if !match_state.sim_runtime.is_installed() {
         return false;
     }
     let (target_rx, target_ry) = match target {
         ContextOrderTarget::ScreenPoint(x, y) => {
-            crate::app::match_runtime::sim_tick::screen_point_to_world_cell(state, x, y)
+            crate::app::match_runtime::sim_tick::screen_point_to_world_cell(match_state, x, y)
         }
         ContextOrderTarget::Radar(target) => target.cell,
     };
     let world_point = match target {
         ContextOrderTarget::ScreenPoint(x, y) => Some(
-            crate::app::match_runtime::sim_tick::screen_point_to_world(state, x, y),
+            crate::app::match_runtime::sim_tick::screen_point_to_world(&match_state.input, x, y),
         ),
         ContextOrderTarget::Radar(_) => None,
     };
@@ -274,26 +308,32 @@ fn queue_context_order(
     // Cell's What_Action answer Move — see `OrderModifier` for the full
     // derivation.
     let mut modifier = resolve_order_modifiers(
-        is_ctrl_held(state),
-        is_shift_held(state),
-        is_alt_held(state),
+        is_ctrl_held(&match_state.input),
+        is_shift_held(&match_state.input),
+        is_alt_held(&match_state.input),
     );
     // The object receiver 4D74E0 reads the force-move key itself
     // (`0x004D79EC..0x004D7A14`), whatever chord it is part of.
-    let force_move_key = is_alt_held(state);
-    let order_mode = state.match_state.input.queued_order_mode;
-    let Some(owner) = preferred_local_owner(state) else {
+    let force_move_key = is_alt_held(&match_state.input);
+    // Ares' Ivan rung reads the force-fire key the same way
+    // ([`super::ares_ivan_grinds`]).
+    let force_fire_key = is_ctrl_held(&match_state.input);
+    let order_mode = match_state.input.queued_order_mode;
+    let Some(owner) = preferred_local_owner(match_state) else {
         return false;
     };
-    let owner_id: InternedId = state
-        .match_state
+    let owner_id: InternedId = match_state
         .sim_runtime
         .runtime()
         .map(|rt| &rt.simulation)
         .and_then(|s| s.interner().get(&owner))
         .unwrap_or_default();
-    let translucent_viewer = state.match_state.sim_runtime.runtime().and_then(|rt| {
-        crate::app::presentation::instances::translucent_fog_viewer(state, &rt.simulation)
+    let translucent_viewer = match_state.sim_runtime.runtime().and_then(|rt| {
+        crate::app::presentation::instances::translucent_fog_viewer(
+            platform,
+            match_state,
+            &rt.simulation,
+        )
     });
 
     let mut queued: Vec<CommandEnvelope> = Vec::new();
@@ -301,23 +341,19 @@ fn queue_context_order(
     // entry of the selection array speak.
     let mut speaker_id: Option<u64> = None;
     let selected_ids = selected_stable_ids_in_order(
-        state
-            .match_state
-            .sim_runtime
-            .runtime()
-            .map(|rt| &rt.simulation),
-        state.rules(),
-        &state.match_state.input.selection_order,
-        state.match_state.input.selection_order_pending,
+        match_state.sim_runtime.runtime().map(|rt| &rt.simulation),
+        crate::app::state::active_rules(frontend, match_state),
+        &match_state.input.selection_order,
+        match_state.input.selection_order_pending,
     );
     // `EVA_NewRallyPointEstablished` is spoken by the click handler itself,
     // after the sim borrow below ends.
     let mut rally_announce = false;
     let mut consumed_attack_action = false;
     let mut planning_cell = None;
-    let planning = state.match_state.input.planning.active();
+    let planning = match_state.input.planning.active();
 
-    if let Some(rt) = state.match_state.sim_runtime.write_sim(SimWrite::Command) {
+    if let Some(rt) = match_state.sim_runtime.write_sim(SimWrite::Command) {
         let resources = &rt.resources;
         let overlay_registry = resources.rules.overlay_registry();
         let sim = &mut rt.simulation;
@@ -330,12 +366,13 @@ fn queue_context_order(
                     crate::app::input::entity_pick::PresentedWorld {
                         sim,
                         rules: Some(&resources.rules),
+                        unit_motion: Some(&match_state.match_presentation.unit_motion),
                         translucent_viewer,
                     },
                     world_x,
                     world_y,
                     &owner,
-                    state.match_state.sandbox_full_visibility,
+                    match_state.sandbox_full_visibility,
                 )
             }
             // Radar653C6A asks What_Action for the tracker identity returned
@@ -413,7 +450,7 @@ fn queue_context_order(
         // Attack becomes Move or NoMove, which the Move rungs below answer; a
         // Building keeps it (`0x00447540`). Nothing is shrouded under the
         // sandbox's full visibility, as for the cursor.
-        let full_visibility = state.match_state.sandbox_full_visibility;
+        let full_visibility = match_state.sandbox_full_visibility;
         let foot_shrouded = |id: u64| {
             !full_visibility
                 && sim
@@ -486,7 +523,20 @@ fn queue_context_order(
                             Command::SynchronizedRecord { record },
                         ));
                     }
-                    finish_order(state, queued, None, rally_announce, None)
+                    finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        None,
+                        rally_announce,
+                        None,
+                    )
                 }
                 // An EMP'd deployer's NoDeploy over himself: each other
                 // receiver's ClickedAction asks its own What_Action over
@@ -508,6 +558,7 @@ fn queue_context_order(
                                         order_mode,
                                         modifier,
                                         force_move_key,
+                                        force_fire_key,
                                         id,
                                         target.stable_id,
                                     )
@@ -515,7 +566,20 @@ fn queue_context_order(
                                 .map(|order| CommandEnvelope::new(owner_id, execute_tick, order)),
                         );
                     }
-                    finish_order(state, queued, speaker_id, rally_announce, None)
+                    finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        speaker_id,
+                        rally_announce,
+                        None,
+                    )
                 }
                 Ok(LeftRelease::Nothing) => true,
                 Ok(LeftRelease::Select) => {
@@ -533,9 +597,20 @@ fn queue_context_order(
                 (target_rx, target_ry),
                 owner_id,
             ) {
-                LeftRelease::Dispatch => {
-                    finish_order(state, queued, speaker_id, rally_announce, None)
-                }
+                LeftRelease::Dispatch => finish_order(
+                    platform,
+                    renderer,
+                    diag,
+                    frontend,
+                    match_state,
+                    process_assets,
+                    sfx_player,
+                    persistence,
+                    queued,
+                    speaker_id,
+                    rally_announce,
+                    None,
+                ),
                 LeftRelease::Nothing => true,
                 LeftRelease::Select => {
                     *selects = true;
@@ -573,7 +648,20 @@ fn queue_context_order(
             selected_units.retain(|id| !repair_dispatch.receivers.contains(id));
             selected_ids.retain(|id| !repair_dispatch.receivers.contains(id));
             if selected_ids.is_empty() {
-                let sent = finish_order(state, queued, speaker_id, rally_announce, None);
+                let sent = finish_order(
+                    platform,
+                    renderer,
+                    diag,
+                    frontend,
+                    match_state,
+                    process_assets,
+                    sfx_player,
+                    persistence,
+                    queued,
+                    speaker_id,
+                    rally_announce,
+                    None,
+                );
                 return sent || (consumed_attack_action && !repair_dispatch.select_fallback);
             }
         }
@@ -617,7 +705,20 @@ fn queue_context_order(
                 selected_units.retain(|id| !engineers.contains(id));
                 selected_ids.retain(|id| !engineers.contains(id));
                 if friendly || selected_units.is_empty() {
-                    return finish_order(state, queued, speaker_id, rally_announce, None);
+                    return finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        speaker_id,
+                        rally_announce,
+                        None,
+                    );
                 }
             }
         }
@@ -647,8 +748,20 @@ fn queue_context_order(
                             .is_some_and(|actor| actor.category() == EntityCategory::Structure)
                 });
                 if selected_ids.is_empty() {
-                    return finish_order(state, queued, speaker_id, rally_announce, None)
-                        || consumed_attack_action;
+                    return finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        speaker_id,
+                        rally_announce,
+                        None,
+                    ) || consumed_attack_action;
                 }
             }
         }
@@ -695,8 +808,20 @@ fn queue_context_order(
                             .is_some_and(|actor| actor.category() == EntityCategory::Structure)
                 });
                 if selected_ids.is_empty() {
-                    return finish_order(state, queued, speaker_id, rally_announce, None)
-                        || consumed_attack_action;
+                    return finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        speaker_id,
+                        rally_announce,
+                        None,
+                    ) || consumed_attack_action;
                 }
             }
         }
@@ -858,7 +983,20 @@ fn queue_context_order(
             .filter(|id| !attack_receivers.contains(id))
             .collect();
         if selected_ids.is_empty() {
-            let sent = finish_order(state, queued, speaker_id, rally_announce, None);
+            let sent = finish_order(
+                platform,
+                renderer,
+                diag,
+                frontend,
+                match_state,
+                process_assets,
+                sfx_player,
+                persistence,
+                queued,
+                speaker_id,
+                rally_announce,
+                None,
+            );
             return sent || (consumed_attack_action && !select_fallback);
         }
         selected_units.retain(|id| !attack_receivers.contains(id));
@@ -942,7 +1080,20 @@ fn queue_context_order(
                     );
                 }
                 if consumed_building_action && selected_units.is_empty() {
-                    return finish_order(state, queued, speaker_id, rally_announce, None);
+                    return finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        speaker_id,
+                        rally_announce,
+                        None,
+                    );
                 }
             }
 
@@ -971,7 +1122,20 @@ fn queue_context_order(
                         .map(|command| CommandEnvelope::new(owner_id, execute_tick, command)),
                 );
                 if selected_units.is_empty() {
-                    return finish_order(state, queued, speaker_id, rally_announce, None);
+                    return finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        speaker_id,
+                        rally_announce,
+                        None,
+                    );
                 }
             }
 
@@ -998,7 +1162,20 @@ fn queue_context_order(
                             .map(|command| CommandEnvelope::new(owner_id, execute_tick, command)),
                     );
                     if !force_move || selected_units.is_empty() {
-                        return finish_order(state, queued, speaker_id, rally_announce, None);
+                        return finish_order(
+                            platform,
+                            renderer,
+                            diag,
+                            frontend,
+                            match_state,
+                            process_assets,
+                            sfx_player,
+                            persistence,
+                            queued,
+                            speaker_id,
+                            rally_announce,
+                            None,
+                        );
                     }
                 }
             }
@@ -1040,7 +1217,20 @@ fn queue_context_order(
                             },
                         ));
                     }
-                    return finish_order(state, queued, speaker_id, rally_announce, None);
+                    return finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        speaker_id,
+                        rally_announce,
+                        None,
+                    );
                 }
             }
 
@@ -1064,7 +1254,20 @@ fn queue_context_order(
             {
                 queued
                     .extend(order.map(|order| CommandEnvelope::new(owner_id, execute_tick, order)));
-                return finish_order(state, queued, speaker_id, rally_announce, None);
+                return finish_order(
+                    platform,
+                    renderer,
+                    diag,
+                    frontend,
+                    match_state,
+                    process_assets,
+                    sfx_player,
+                    persistence,
+                    queued,
+                    speaker_id,
+                    rally_announce,
+                    None,
+                );
             }
             if let Some(target) = hover.as_ref()
                 && self_detonates(sim, &resources.rules, &current_objects, target.stable_id)
@@ -1075,7 +1278,20 @@ fn queue_context_order(
                     execute_tick,
                     Command::SynchronizedRecord { record },
                 ));
-                return finish_order(state, queued, None, rally_announce, None);
+                return finish_order(
+                    platform,
+                    renderer,
+                    diag,
+                    frontend,
+                    match_state,
+                    process_assets,
+                    sfx_player,
+                    persistence,
+                    queued,
+                    None,
+                    rally_announce,
+                    None,
+                );
             }
             if context_actions_enabled
                 && let Some(cmd) = self_click_command(
@@ -1089,7 +1305,20 @@ fn queue_context_order(
                 )
             {
                 queued.push(CommandEnvelope::new(owner_id, execute_tick, cmd));
-                return finish_order(state, queued, speaker_id, rally_announce, None);
+                return finish_order(
+                    platform,
+                    renderer,
+                    diag,
+                    frontend,
+                    match_state,
+                    process_assets,
+                    sfx_player,
+                    persistence,
+                    queued,
+                    speaker_id,
+                    rally_announce,
+                    None,
+                );
             }
             if context_actions_enabled
                 && hover.as_ref().is_some_and(|target| {
@@ -1104,7 +1333,20 @@ fn queue_context_order(
                     )
                 })
             {
-                return finish_order(state, queued, speaker_id, rally_announce, None);
+                return finish_order(
+                    platform,
+                    renderer,
+                    diag,
+                    frontend,
+                    match_state,
+                    process_assets,
+                    sfx_player,
+                    persistence,
+                    queued,
+                    speaker_id,
+                    rally_announce,
+                    None,
+                );
             }
             if context_actions_enabled
                 && let Some(target) = hover.as_ref()
@@ -1123,40 +1365,84 @@ fn queue_context_order(
                         queued.extend(
                             order.map(|order| CommandEnvelope::new(owner_id, execute_tick, order)),
                         );
-                        finish_order(state, queued, speaker_id, rally_announce, None)
+                        finish_order(
+                            platform,
+                            renderer,
+                            diag,
+                            frontend,
+                            match_state,
+                            process_assets,
+                            sfx_player,
+                            persistence,
+                            queued,
+                            speaker_id,
+                            rally_announce,
+                            None,
+                        )
                     }
                     _ => true,
                 };
             }
-            // A Crazy Ivan bombs a friend by a plain click, when the object that
-            // owns the cursor is one of the bombing Ivans.
+            // A Crazy Ivan bombs a friend by a plain click, or with Ares walks
+            // into an allied Grinder, when the object that owns the cursor is
+            // one of those Ivans.
             if clicked_friendly
                 && context_actions_enabled
                 && !force_move
                 && let Some(target) = hover.as_ref()
             {
-                let ivans = friendly_bomb_ivans(
+                let ivans = friendly_ivans(
                     sim,
                     &resources.rules,
                     &selected_units,
                     current_objects.len(),
                     target.stable_id,
+                    force_fire_key,
                     Some(overlay_registry),
                 );
                 if cursor_owner(sim, &resources.rules, &selected_ids, target.stable_id)
-                    .is_some_and(|best| ivans.contains(&best))
+                    .is_some_and(|best| ivans.iter().any(|&(id, _)| id == best))
                 {
-                    for attacker_id in ivans {
-                        queued.push(CommandEnvelope::new(
-                            owner_id,
-                            execute_tick,
-                            Command::Attack {
-                                attacker_id,
+                    for (id, action) in ivans {
+                        let order = match action {
+                            FriendlyIvanAction::Bomb => Command::Attack {
+                                attacker_id: id,
                                 target_id: target.stable_id,
                             },
-                        ));
+                            // Foot ClickedAction (`0x004D74E0`) case 0xB, for
+                            // a receiver the player may order (vt+0xA0).
+                            FriendlyIvanAction::Grind => {
+                                if !sim.local_techno_controllable_with(
+                                    &control,
+                                    id,
+                                    &resources.rules,
+                                ) {
+                                    continue;
+                                }
+                                Command::MegaMission {
+                                    entity_id: id,
+                                    mission: crate::sim::mission::MissionType::Eaten,
+                                    target: None,
+                                    destination: Some(TargetKind::Entity(target.stable_id)),
+                                }
+                            }
+                        };
+                        queued.push(CommandEnvelope::new(owner_id, execute_tick, order));
                     }
-                    return finish_order(state, queued, speaker_id, rally_announce, None);
+                    return finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        speaker_id,
+                        rally_announce,
+                        None,
+                    );
                 }
             }
             // The cursor owner's What_Action distinguishes a different allied
@@ -1187,7 +1473,20 @@ fn queue_context_order(
                     || consumed_attack_action)
             {
                 return if consumed_building_action || consumed_attack_action {
-                    finish_order(state, queued, speaker_id, rally_announce, None)
+                    finish_order(
+                        platform,
+                        renderer,
+                        diag,
+                        frontend,
+                        match_state,
+                        process_assets,
+                        sfx_player,
+                        persistence,
+                        queued,
+                        speaker_id,
+                        rally_announce,
+                        None,
+                    )
                 } else {
                     *selects = !friendly_unit_action;
                     false
@@ -1332,7 +1631,7 @@ fn queue_context_order(
             .then(|| {
                 locked_move_cells(
                     sim,
-                    &state.match_state.input.formation_locks,
+                    &match_state.input.formation_locks,
                     &selected_units,
                     (target_rx, target_ry),
                 )
@@ -1349,12 +1648,27 @@ fn queue_context_order(
                         order_mode,
                         modifier,
                         force_move_key,
+                        force_fire_key,
                         stable_id,
                         target_id,
                     ) else {
                         continue;
                     };
                     payload
+                } else if let Some(order) = hover_terrain.and_then(|terrain| {
+                    healer_terrain_key_order(
+                        sim,
+                        &control,
+                        &resources.rules,
+                        stable_id,
+                        terrain,
+                        key_modifier,
+                        force_move_key,
+                    )
+                }) {
+                    // A healer's AttackSupport over a Terrain object replaces
+                    // its Alt or Ctrl+Alt answer (`0x0051E797`).
+                    order
                 } else if let Some((_, Some(target_id))) = force_move_object
                     && key_modifier != OrderModifier::Shift
                 {
@@ -1370,6 +1684,7 @@ fn queue_context_order(
                         order_mode,
                         key_modifier,
                         force_move_key,
+                        force_fire_key,
                         stable_id,
                         target_id,
                     ) else {
@@ -1517,5 +1832,18 @@ fn queue_context_order(
         }
     }
 
-    finish_order(state, queued, speaker_id, rally_announce, planning_cell) || consumed_attack_action
+    finish_order(
+        platform,
+        renderer,
+        diag,
+        frontend,
+        match_state,
+        process_assets,
+        sfx_player,
+        persistence,
+        queued,
+        speaker_id,
+        rally_announce,
+        planning_cell,
+    ) || consumed_attack_action
 }

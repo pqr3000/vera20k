@@ -5,81 +5,80 @@
 //! RESIDUAL: the statics paint at once, without their kind-1 reveal, and
 //! the page has no entry or exit slide.
 
+use super::SHELL_PARENT_BACKGROUND_DEPTH;
 use super::chrome::*;
-use super::controls::{
-    ControlPaint, house_color_tint, list_view_controls, paint_control, push_new_edit,
-};
 use super::in_game_shell::{
     self, InGameShellFrame, ShellFrameArt, ShellFrameCursor, ShellFrameOverlay,
 };
 use super::preview::{build_preview_surface_instance, ensure_map_preview_texture};
-use super::text::rect_to_text_rect;
-use super::{
-    SHELL_CONTROL_DEPTH, SHELL_CONTROL_TEXT_DEPTH, SHELL_LABEL_TEXT_RGB,
-    SHELL_PARENT_BACKGROUND_DEPTH,
-};
-use crate::app::AppState;
-use crate::render::shell_text;
+use crate::app::frontend::state::FrontendState;
+use crate::app::match_runtime::state::MatchState;
+use crate::app::persistence::PersistenceState;
+use crate::app::process_assets::ProcessAssets;
+use crate::app::renderer_state::RendererState;
+use crate::app::state::PlatformState;
+use crate::render::hud_paint::Material;
 use crate::ui::campaign_score_shell::campaign_score_background_rect;
 use crate::ui::coop_score_shell::*;
-use crate::ui::shell::geom::{RectPx, ShellAlign};
 
 pub(crate) fn render_coop_score(
-    state: &mut AppState,
+    platform: &mut PlatformState,
+    renderer: &mut RendererState,
+    frontend: &mut FrontendState,
+    match_state: &mut MatchState,
+    process_assets: &ProcessAssets,
+    persistence: &PersistenceState,
     encoder: &mut wgpu::CommandEncoder,
     destination: &wgpu::Texture,
 ) -> anyhow::Result<bool> {
-    if state.frontend.skirmish_shell_chrome.is_none() {
+    if frontend.skirmish_shell_chrome.is_none() {
         return Ok(false);
     }
-    let Some(view) = crate::app::cooperative_round::view(state) else {
+    let Some(view) = crate::app::cooperative_round::view(frontend, match_state, process_assets)
+    else {
         return Ok(false);
     };
-    crate::app::input::coop_score::update_geometry(state);
-    let layout = crate::app::input::coop_score::layout(state);
+    crate::app::input::coop_score::update_geometry(renderer, frontend, match_state, process_assets);
+    let layout = crate::app::input::coop_score::layout(&renderer.gpu);
     let scale = layout.page.scale;
-    let (width, height) = (state.render_width(), state.render_height());
-    let fills = crate::app::frontend::shell_layout::fills_window(state);
+    let (width, height) = (
+        renderer.render_width(&frontend.screen),
+        renderer.render_height(&frontend.screen),
+    );
+    let fills = crate::app::frontend::shell_layout::fills_window(&renderer.gpu);
     let (can_continue, map_index) = {
-        let model = &state.frontend.coop_score_page.as_ref().expect("view").model;
+        let model = &frontend.coop_score_page.as_ref().expect("view").model;
         (model.can_continue, model.map_index)
     };
     match map_index.filter(|_| can_continue) {
         Some(index) => {
             let preview = layout.control_rect(PREVIEW).unwrap_or_default();
-            ensure_map_preview_texture(state, index, preview)
+            ensure_map_preview_texture(
+                platform,
+                renderer,
+                frontend,
+                process_assets,
+                persistence,
+                index,
+                preview,
+            )
         }
-        None => state.frontend.skirmish_preview_texture = None,
+        None => frontend.skirmish_preview_texture = None,
     }
     let shown = |id: u16| can_continue || !hidden_on_final_mission(id);
-    let controller = &state.frontend.shell_controller;
+    let controller = &frontend.shell_controller;
     let hovered = crate::ui::shell::menu_page::hovered_id(controller, COOP_SCORE_PAGE.dialog);
     let status = hovered
         .and_then(help_key)
-        .map(|key| state.csf_label(key, ""))
+        .map(|key| process_assets.csf_label(key, ""))
         .unwrap_or_default();
-    let title = state.csf_label(COOP_SCORE_PAGE.title_key, COOP_SCORE_PAGE.title_key);
-    let page = state.frontend.coop_score_page.as_ref().expect("view");
+    let page = frontend.coop_score_page.as_ref().expect("view");
     let model = &page.model;
     let ui = &page.ui;
-    let atlas = state
-        .frontend
+    let atlas = frontend
         .skirmish_shell_chrome
         .as_ref()
         .expect("checked above");
-    let font = &state.renderer.bit_font;
-    let text = |value: &str, rect: RectPx, align: ShellAlign, rgb: [f32; 3]| {
-        shell_text::draw_in_rect_scaled(
-            font,
-            value,
-            rect_to_text_rect(rect),
-            rgb,
-            align,
-            [0.0; 2],
-            SHELL_CONTROL_TEXT_DEPTH,
-            scale.factor(),
-        )
-    };
     let rgb = |rgb: [u8; 3]| rgb.map(|channel| f32::from(channel) / 255.0);
 
     // Paint mode 1: RightPanel__Draw, the dialog background, then D5/D6.
@@ -93,7 +92,7 @@ pub(crate) fn render_coop_score(
         &chrome_layout,
         super::draw_order::ShellDialogChromeProfile::SkirmishSetup0x102,
     );
-    let score_backdrop = state.frontend.campaign_score_art.as_ref().map(|scores| {
+    let score_backdrop = frontend.campaign_score_art.as_ref().map(|scores| {
         let (aw, ah) = if fills {
             (800, 600)
         } else {
@@ -112,223 +111,143 @@ pub(crate) fn render_coop_score(
         sprites[0]
     });
 
-    let mut controls = Vec::new();
-    let mut texts = Vec::new();
-    texts.push(text(
-        &title,
-        layout.page.title,
-        ShellAlign::PANEL_TITLE,
-        SHELL_LABEL_TEXT_RGB,
-    ));
-    texts.push(text(
-        &status,
-        layout.page.status_help,
-        ShellAlign::V_CENTER,
-        SHELL_LABEL_TEXT_RGB,
-    ));
-    for spec in COOP_SCORE_CONTROLS.iter().filter(|spec| shown(spec.id)) {
-        let Some(rect) = layout.control_rect(spec.id) else {
-            continue;
-        };
-        let value = match (spec.id, spec.caption_key) {
-            (TIME, _) => model.time.clone(),
-            (NEXT_MISSION, _) => model.next_mission.clone(),
-            (DESCRIPTION, _) => model.description.clone(),
-            (_, Some(key)) => state.csf_label(key, key),
-            (_, None) => continue,
-        };
-        texts.push(text(&value, rect, spec.align, SHELL_LABEL_TEXT_RGB));
-    }
-    for (label, id) in [
-        (&model.mode_label, MODE_LABEL),
-        (&model.map_label, MAP_LABEL),
-    ] {
-        if shown(id)
-            && let Some(rect) = layout.control_rect(id)
-        {
-            texts.push(text(
-                label,
-                rect,
-                ShellAlign::H_CENTER,
-                SHELL_LABEL_TEXT_RGB,
-            ));
-        }
-    }
-    // The tail's cells: name, then "%d" for each count, in the row colour.
-    for (row, cells) in model.rows.iter().zip(ROW_CELLS) {
-        for (column, (value, id)) in row.cells().iter().zip(cells).enumerate() {
-            let align = if column == 0 {
-                ShellAlign::NONE
-            } else {
-                ShellAlign::H_RIGHT
-            };
-            if let Some(rect) = layout.control_rect(id) {
-                texts.push(text(value, rect, align, rgb(row.rgb)));
-            }
-        }
-    }
-    let chrome = atlas.control_chrome();
-    for (row, slot) in view.slots.iter().enumerate() {
-        let Some(slot) = slot else {
-            continue;
-        };
-        // 0x0046FA20: wolhost.pcx on slot 0 and wolacpt.pcx on slot 1 while
-        // ready, on human slots only.
-        if let Some(icon) = atlas.lan_player_status(row == 0 && slot.ready, row == 1 && slot.ready)
-            && let Some(rect) = layout.control_rect(READY_ICONS[row])
-        {
-            push_flag_entry_clipped_centered(&mut controls, icon, rect, scale, SHELL_CONTROL_DEPTH);
-        }
-        if !can_continue {
-            continue;
-        }
-        if let Some(flag) = slot
-            .flag
-            .as_deref()
-            .and_then(|name| atlas.lan_player_side(name))
-            && let Some(rect) = layout.control_rect(FLAGS[row])
-        {
-            push_flag_entry_clipped_centered(&mut controls, flag, rect, scale, SHELL_CONTROL_DEPTH);
-        }
-        let name = crate::ui::multiplayer_setup::SetupChoice {
-            value: 0,
-            text: slot.name.clone(),
-            swatch: None,
-            greyed: false,
-        };
-        // 0x0046DCC0 disables the other human's combos; the name combo has
-        // no handler and stays disabled for both.
-        for (id, item, enabled) in [
-            (NAMES[row], &name, false),
-            (COUNTRIES[row], &slot.country, slot.enabled),
-            (COLORS[row], &slot.color, slot.enabled),
-            (STARTS[row], &slot.start, slot.enabled),
-        ] {
-            let Some(rect) = layout.control_rect(id) else {
-                continue;
-            };
-            paint_control(
-                &mut controls,
-                &chrome,
-                ControlPaint::Combo {
-                    rect,
-                    swatch: item
-                        .swatch
-                        .map(|index| house_color_tint(state.rules(), index)),
-                    open: false,
-                    disabled: !enabled,
-                },
-                scale,
-            );
-            if item.swatch.is_none() {
-                texts.push(text(
-                    &item.text,
-                    crate::ui::skirmish_shell::combo_text_rect(rect, scale),
-                    ShellAlign::V_CENTER,
-                    super::text::combo_face_text_color(!enabled),
-                ));
-            }
-        }
-    }
-    if can_continue && let Some(rect) = layout.control_rect(DIFFICULTY) {
-        // 0x0046DE20's slider: range 0..2 at [0xA8EB68], no value plaque.
-        let bar = crate::ui::multiplayer_setup::SetupTrackbar {
-            id: crate::ui::multiplayer_setup::DIFFICULTY,
-            value: view.difficulty,
-            range: DIFFICULTY_RANGE,
-            enabled: view.host,
-            visible: true,
-        };
-        paint_control(
-            &mut controls,
-            &chrome,
-            ControlPaint::Trackbar {
-                rect,
-                thumb_left: bar.thumb_left(rect, scale),
-                plaque: false,
-                // EnableWindow(0x732) at `0x0046DDF3..0x0046DE10`.
-                disabled: !bar.enabled,
-            },
-            scale,
-        );
-    }
-    let (Some(chat_rect), Some(chat_log_rect)) =
-        (layout.control_rect(CHAT), layout.control_rect(CHAT_LOG))
-    else {
-        return Ok(false);
-    };
-    // The NewEdit paints inside its one-pixel resource frame.
-    let chat_rect = scale.derive_rect(chat_rect, |rect| {
-        RectPx::new(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2)
-    });
-    // The edit and the log as their widgets hold them. The caret shows
-    // steadily while the edit has BC6's focus.
+    // The body from its nodes, in the order it paints: the heading and
+    // status line, the statics, the score cells in their row's colour, each
+    // slot's icons and lists (shown, never opened), Difficulty, the chat
+    // edit in its one-pixel frame with its caret steady while it has BC6's
+    // focus, and the transcript.
+    let dialog = COOP_SCORE_PAGE.dialog;
     let gui = controller.gui();
-    let edit_node = controller.control(COOP_SCORE_PAGE.dialog, CHAT);
-    let mut edit = edit_node.map_or_else(Default::default, |node| {
-        gui.edit_state(node).unwrap_or_default()
-    });
-    edit.focused = controller.focused_control(COOP_SCORE_PAGE.dialog) == Some(CHAT);
-    let caret = edit.focused;
-    let (yellow, depth) = (SHELL_LABEL_TEXT_RGB, SHELL_CONTROL_TEXT_DEPTH);
-    push_new_edit(
-        &mut controls,
-        &mut texts,
-        atlas,
-        font,
-        &edit,
-        None,
-        chat_rect,
-        caret,
-        yellow,
-        depth,
-        scale,
-    );
-    let log = controller
-        .control(COOP_SCORE_PAGE.dialog, CHAT_LOG)
-        .and_then(|node| gui.list_view(node));
-    let top = log.map_or(0, |log| log.top);
-    let pressed = log.and_then(|log| log.pressed);
-    let metrics = vera20k_gui::shell::list::ListMetrics::scaled(scale);
-    let chat = vera20k_gui::shell::list::ShellListGeometry::new(
-        chat_log_rect,
-        ui.chat.lines.len(),
-        top,
-        metrics,
-    );
-    list_view_controls(&mut controls, atlas, chat, (None, top, pressed), scale);
-    for (visible, line) in ui
-        .chat
-        .lines
-        .iter()
-        .skip(top)
-        .take(chat.visible_rows)
-        .enumerate()
-    {
-        let color = if line.color == u32::MAX {
-            SHELL_LABEL_TEXT_RGB
-        } else {
-            rgb([
-                line.color as u8,
-                (line.color >> 8) as u8,
-                (line.color >> 16) as u8,
-            ])
+    let text_of = |id: i32| {
+        let id = u16::try_from(id).ok()?;
+        let slot = |ids: [u16; 2]| view.slots[ids.iter().position(|each| *each == id)?].as_ref();
+        let pick = |choice: &crate::ui::multiplayer_setup::SetupChoice| {
+            choice.swatch.is_none().then(|| choice.text.clone())
         };
-        texts.push(text(
-            &String::from_utf16_lossy(&line.text),
-            scale.derive_rect(chat.row(visible), |rect| {
-                RectPx::new(rect.x + 2, rect.y, rect.w - 4, rect.h)
-            }),
-            ShellAlign::V_CENTER,
-            color,
-        ));
-    }
+        if let Some((row, column)) = ROW_CELLS
+            .iter()
+            .enumerate()
+            .find_map(|(row, cells)| Some((row, cells.iter().position(|cell| *cell == id)?)))
+        {
+            let row = model.rows.get(row)?;
+            return Some(match column {
+                0 => row.name.clone(),
+                1 => row.kills.to_string(),
+                2 => row.losses.to_string(),
+                3 => row.built.to_string(),
+                _ => row.score.to_string(),
+            });
+        }
+        match id {
+            TITLE => {
+                Some(process_assets.csf_label(COOP_SCORE_PAGE.title_key, COOP_SCORE_PAGE.title_key))
+            }
+            STATUS => Some(status.clone()),
+            TIME => Some(model.time.clone()),
+            NEXT_MISSION => Some(model.next_mission.clone()),
+            DESCRIPTION => Some(model.description.clone()),
+            MODE_LABEL => Some(model.mode_label.clone()),
+            MAP_LABEL => Some(model.map_label.clone()),
+            id if NAMES.contains(&id) => slot(NAMES).map(|slot| slot.name.clone()),
+            id if COUNTRIES.contains(&id) => pick(&slot(COUNTRIES)?.country),
+            id if COLORS.contains(&id) => pick(&slot(COLORS)?.color),
+            id if STARTS.contains(&id) => pick(&slot(STARTS)?.start),
+            id => {
+                let spec = COOP_SCORE_CONTROLS.iter().find(|spec| spec.id == id)?;
+                spec.caption_key
+                    .map(|key| process_assets.csf_label(key, key))
+            }
+        }
+    };
+    // The cells take their row's colour.
+    let rgb_of = |id: i32| {
+        let id = u16::try_from(id).ok()?;
+        let row = ROW_CELLS.iter().position(|cells| cells.contains(&id))?;
+        Some(rgb(model.rows.get(row)?.rgb))
+    };
+    // 0x0046FA20: wolhost.pcx on slot 0 and wolacpt.pcx on slot 1 while
+    // ready, on human slots only.
+    let picture_of = |id: i32| {
+        let row = READY_ICONS.iter().position(|icon| i32::from(*icon) == id)?;
+        let ready = view.slots[row].as_ref()?.ready;
+        Some(super::gui_paint::Picture::Status {
+            host: row == 0 && ready,
+            accepted: row == 1 && ready,
+        })
+    };
+    // 0x0046DCC0 disables the other human's combos; the name combo has no
+    // handler and stays disabled for both. EnableWindow(0x732) at
+    // `0x0046DDF3..0x0046DE10`.
+    let enabled_of = |id: i32| {
+        let id = u16::try_from(id).ok()?;
+        if id == DIFFICULTY {
+            return Some(view.host);
+        }
+        if NAMES.contains(&id) {
+            return Some(false);
+        }
+        let row = [COUNTRIES, COLORS, STARTS]
+            .iter()
+            .find_map(|ids| ids.iter().position(|each| *each == id))?;
+        Some(view.slots[row].as_ref()?.enabled)
+    };
+    let focused = |_: vera20k_gui::NodeId| controller.focused_control(dialog) == Some(CHAT);
+    // The transcript's rows in view, each in its colour.
+    let log = controller.control(dialog, CHAT_LOG).and_then(|node| {
+        Some((
+            gui.list_view(node)?.top,
+            gui.list_geometry(node)?.visible_rows,
+        ))
+    });
+    let rows_of = |id: i32| {
+        let (top, visible) = log.filter(|_| id == i32::from(CHAT_LOG))?;
+        let line = |(index, line): (usize, &crate::ui::lan_shell::LanChatLine)| {
+            let text = match (top..top + visible).contains(&index) {
+                true => String::from_utf16_lossy(&line.text),
+                false => String::new(),
+            };
+            (text, line.color)
+        };
+        Some(ui.chat.lines.iter().enumerate().map(line).collect())
+    };
+    let style = super::gui_paint::GuiStyle {
+        ime: false,
+        text_of: Some(&text_of),
+        rgb_of: Some(&rgb_of),
+        picture_of: Some(&picture_of),
+        enabled_of: Some(&enabled_of),
+        focus_of: Some(&focused),
+        caret_of: Some(&focused),
+        rows_of: Some(&rows_of),
+        control_lists: true,
+        clipped_faces: true,
+        edit_inset: Some(1),
+        ..Default::default()
+    };
+    let mut body = match controller.root_in(dialog) {
+        Some(root) => super::gui_paint::paint_gui_with(
+            &platform.ime,
+            &renderer.bit_font,
+            frontend,
+            match_state,
+            process_assets,
+            atlas,
+            gui,
+            root,
+            scale,
+            &[],
+            style,
+        ),
+        None => Default::default(),
+    };
+    let controls = body.take_lane(Material::Controls);
+    let mut texts = body.texts;
     let mut overlay = ShellFrameOverlay {
         score_backdrop,
         ..Default::default()
     };
     if let (Some(preview), Some(rect)) = (
-        state.frontend.skirmish_preview_texture.as_ref(),
+        frontend.skirmish_preview_texture.as_ref(),
         layout.control_rect(PREVIEW),
     ) {
         overlay.preview = build_preview_surface_instance(rect, preview.width, preview.height);
@@ -345,18 +264,26 @@ pub(crate) fn render_coop_score(
         };
         let ids = layout.page.buttons.iter().map(|button| button.id);
         let buttons = super::gui_paint::paint_gui_ids(
-            state,
+            &platform.ime,
+            &renderer.bit_font,
+            frontend,
+            match_state,
+            process_assets,
             controller.gui(),
             root,
             ids.filter(|id| shown(*id)),
             scale,
             style,
         );
-        art.extend(buttons.controls);
+        art.extend(buttons.lane(Material::Controls).copied());
         texts.extend(buttons.texts);
     }
     in_game_shell::render_shell_frame(
-        state,
+        platform,
+        renderer,
+        frontend,
+        match_state,
+        persistence,
         encoder,
         destination,
         InGameShellFrame {
@@ -369,6 +296,6 @@ pub(crate) fn render_coop_score(
         overlay,
         ShellFrameCursor::Visible,
     )?;
-    state.platform.window.request_redraw();
+    platform.window.request_redraw();
     Ok(true)
 }

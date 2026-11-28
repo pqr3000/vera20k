@@ -124,7 +124,6 @@ fn assert_shp_light(runtime: &mut SimRuntime, id: u64, light: &CellLightGrid, ex
             .snapshot(),
     );
     let frame = PresentationFrame::capture(runtime, &Default::default(), false);
-    frame.display_order(sim);
     let viewer = sim.session().current_house();
     let presentation = runtime.presentation_copy(viewer, None);
     assert_shp_light_on_frame(&presentation, &frame, id, light, expected);
@@ -196,6 +195,8 @@ fn assert_shp_light_on_frame(
     let mut draws = PlannedObjects::default();
     build_shp_instances_from_inputs(
         &ShpInputs {
+            motion: None,
+            diagnostics: None,
             runtime,
             frame,
             atlas: Some(&atlas),
@@ -210,7 +211,6 @@ fn assert_shp_light_on_frame(
             building_viewport: crate::app::presentation::render::tactical_world_viewport(
                 camera,
                 [0, 0, 800, 600],
-                None,
             ),
             axis: crate::render::batch::DepthAxis {
                 origin_y: 0.0,
@@ -221,9 +221,10 @@ fn assert_shp_light_on_frame(
             lighting: light,
             house_colors: &colors,
             building_zshape: None,
+            model_frame: None,
         },
         &mut draws,
-        frame.display_order(&runtime.simulation),
+        frame.display_order(),
     );
     let draws = draws.into_owned();
     let mut bodies = draws

@@ -103,6 +103,15 @@ pub(crate) struct FrontendState {
     /// `0x100`, `0x101`, `0x129`): hover help, hidden until the dialog's SHOW
     /// completion, then a kind-1 reveal that restarts on every text change.
     pub(crate) shell_status_line: crate::ui::shell::static_reveal::PresentedKind1Static,
+    /// The heading and the status line as widgets, which the family pages,
+    /// the online pages and Options paint from
+    /// ([`crate::app::frontend::menu_page_render::paint_panel_statics`]).
+    pub(crate) panel_statics:
+        std::cell::RefCell<crate::app::frontend::menu_page_render::PanelStatics>,
+    /// The saved-game loading box `0xF0`'s widgets: it takes no input, so
+    /// no other controller holds it
+    /// ([`crate::app::frontend::skirmish_shell_render::render_saved_game_loading`]).
+    pub(crate) loading_box: crate::ui::shell::controller::DialogController,
     /// The showing family dialog's teardown slide-out while it runs; its
     /// continuation commits the route change when the slide ends.
     pub(crate) shell_exit: Option<crate::app::frontend::shell_transition::ShellExit>,
@@ -281,6 +290,16 @@ pub(crate) struct FrontendState {
     pub(crate) updater: crate::app::updater::Updater,
 }
 
+impl FrontendState {
+    /// Whether any main-menu modal dialog (exit confirm, options, keyboard)
+    /// is currently open.
+    pub(crate) fn main_menu_dialog_open(&self) -> bool {
+        self.shell_message_box.is_some()
+            || self.options_dialog.is_some()
+            || self.keyboard_dialog.is_some()
+    }
+}
+
 /// One open shell message box `0x120` and the caller its result returns to.
 #[derive(Debug)]
 pub(crate) struct ShellMessageBox {
@@ -301,12 +320,37 @@ impl ShellMessageBox {
                 | ShellMessageBoxPurpose::ModFiles(_)
                 | ShellMessageBoxPurpose::ModMade(_)
         ) || self.is_mod_import()
+            || self.is_android_mods_box()
+    }
+
+    /// Android: the Mods page's own notice and delete question.
+    fn is_android_mods_box(&self) -> bool {
+        #[cfg(target_os = "android")]
+        return matches!(
+            self.purpose,
+            ShellMessageBoxPurpose::ModNotice | ShellMessageBoxPurpose::ModDelete(_)
+        );
+        #[cfg(not(target_os = "android"))]
+        false
     }
 
     pub(crate) fn is_mod_import(&self) -> bool {
-        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
-        return matches!(self.purpose, ShellMessageBoxPurpose::ModImport(_));
-        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+        #[cfg(any(
+            windows,
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "android"
+        ))]
+        return matches!(
+            self.purpose,
+            ShellMessageBoxPurpose::ModImport(_) | ShellMessageBoxPurpose::ModAddChoice(_)
+        );
+        #[cfg(not(any(
+            windows,
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "android"
+        )))]
         false
     }
 
@@ -337,6 +381,8 @@ pub(crate) enum ShellMessageBoxPurpose {
     ShellMenu(Box<crate::ui::main_menu_dialogs::OptionsDialogState>),
     /// Main_Game state 6: OK quits, Cancel rebuilds `0xE2`.
     ExitGame,
+    /// Exit-style confirmation before restarting into the other edition.
+    SwitchEdition { ra2: bool },
     /// GameExit::Defeat `0x006860E5`: Yes restarts this start, if VERA can
     /// rebuild one; No returns to the shell.
     CampaignReplay(Option<Box<crate::app::match_bootstrap::PreparedCampaignStartup>>),
@@ -362,13 +408,37 @@ pub(crate) enum ShellMessageBoxPurpose {
     /// original game, for the next start and starts the game again.
     ModRestart(Option<String>),
     /// ZIPs or extracted parts selected for Add Mod, or their import in progress.
-    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    #[cfg(any(
+        windows,
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    ))]
     ModImport(Box<crate::app::shell_mod_import::Dialog>),
+    /// The Mods page's Add Mod while a mod is selected: a new mod, or parts
+    /// for the selected one, through the same picker (`app::shell_mods`).
+    #[cfg(any(
+        windows,
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    ))]
+    ModAddChoice(String),
+    /// The Mods page's Export Mod: ZIP, a folder copy, or cancel.
+    #[cfg(target_os = "android")]
+    ModExportChoice(String),
     /// The Mods page's Check Files (`App::check_picked_mod`).
     ModFiles(ModFilesBox),
     /// The Mods page's New Mod made this folder: Open Folder shows it, Close
-    /// closes.
+    /// closes. Android says so in a notice: no file manager opens its folders.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     ModMade(std::path::PathBuf),
+    /// Android: what a Mods page action came to, with OK.
+    #[cfg(target_os = "android")]
+    ModNotice,
+    /// Android: Delete Mod's question; Delete removes this folder.
+    #[cfg(target_os = "android")]
+    ModDelete(String),
 }
 
 /// The boxes of the Mods page's Check Files, in the order they come.

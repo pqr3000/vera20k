@@ -49,8 +49,10 @@ pub enum CanBuild {
 
 /// `HouseClass::CanBuild @ 0x004F7870` for house `owner` and type `obj`.
 ///
-/// A type VERA's room bans ([`crate::sim::game_options::RoomBans`]) is
-/// refused first, whatever the flags. With `skip_tech` (the first flag),
+/// A type VERA's room bans ([`crate::sim::game_options::RoomBans`]) or a
+/// Wasm module's `ProductionAllowed` answer disallows, or a module's
+/// `AllowType` forbids, is refused first, whatever the flags. With
+/// `skip_tech` (the first flag),
 /// only the build limit is asked ([`build_limit`]). Otherwise, in order (`0x004F7889..0x004F7BE5`):
 /// - `TechnoType+0xC98` refuses; only the constructor writes it, with 0
 ///   (`0x007113CC`);
@@ -104,6 +106,17 @@ pub fn can_build(
     if sim.session.game_options().bans.bans_type(obj) {
         return CanBuild::No;
     }
+    // VERA extension, Wasm module `ProductionAllowed` (RFC 0001 appendix
+    // 4.5, `sim::ext_modules::decide`): a type a module disallowed to this
+    // house at the latest once-per-frame step is refused here, at
+    // CanBuild's entry, whatever the flags, as a room ban is. Without a
+    // refusal kept this is one branch.
+    // A Wasm module's `AllowType` forbid (RFC 0001 appendix 5.3, VERA-only)
+    // refuses the type to this house the same way, on every route.
+    if sim.module_refuses_production(rules, owner, obj) || sim.ext_module_forbids(rules, owner, obj)
+    {
+        return CanBuild::No;
+    }
     if skip_tech {
         return build_limit(sim, rules, owner, obj, count_in_production);
     }
@@ -138,6 +151,30 @@ pub fn can_build(
         }
     }
     build_limit(sim, rules, owner, obj, count_in_production)
+}
+
+/// VERA, for a Wasm module's house order (RFC 0001 6g): whether `owner`'s
+/// player could choose `obj`, as [`can_build`]'s human arm asks it. A house
+/// no human controls is answered Yes there without its prerequisites, so a
+/// module's order adds the human arm's requirements and prerequisites
+/// (`0x004F7BF1..0x004F7F52`) to CanBuild's own answer.
+pub(crate) fn buildable_by_player(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    obj: &ObjectType,
+) -> bool {
+    if can_build(sim, rules, owner, obj, false, true) == CanBuild::No {
+        return false;
+    }
+    let Some(house) = sim.houses.get(&owner) else {
+        return false;
+    };
+    match requirements_met(sim, rules, owner, house, obj) {
+        RequirementStatus::Overridden => true,
+        RequirementStatus::Complete => owns_prerequisites(sim, rules, house, obj),
+        _ => false,
+    }
 }
 
 /// `HouseClass::CanBuild`'s qualification ahead of the prerequisites
@@ -860,6 +897,48 @@ pub fn object_find_factory(
         require_online,
         false,
     )
+}
+
+/// What `HouseExt::FindFactory` (Ares.dll `10020D40`) finds for an object's
+/// type among its owner's factories ([`ares_object_factory`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AresObjectFactory {
+    /// No factory fits (state 1).
+    Missing,
+    /// Only factories without power or deactivated fit (state 2).
+    Unpowered,
+    /// A factory that fits, the primary first (states 3 and 4).
+    Found(u64),
+}
+
+/// Ares' sidebar cameo click asks `HouseExt::FindFactory(owner, type, false,
+/// true, false, true)` (`10020D40`) for the ready product `object_id` itself
+/// (SidebarClass_ProcessCameoClick_Power, Ares.dll `10025170`, hook
+/// `0x006AB312`, in place of the stock `FindFactory(0, 0)`): any fitting
+/// factory without power or deactivated only counts as
+/// [`AresObjectFactory::Unpowered`], and the first powered one or the
+/// primary answers.
+pub fn ares_object_factory(sim: &Simulation, rules: &RuleSet, object_id: u64) -> AresObjectFactory {
+    let Some(object) = sim.entities().get(object_id) else {
+        return AresObjectFactory::Missing;
+    };
+    let Some(object_type) = sim.entity_object_type(object, rules) else {
+        return AresObjectFactory::Missing;
+    };
+    match query_factory(
+        sim,
+        rules,
+        object.owner(),
+        object_type,
+        false,
+        true,
+        false,
+        true,
+    ) {
+        FactorySearch::Online(id) | FactorySearch::Primary(id) => AresObjectFactory::Found(id),
+        FactorySearch::Offline => AresObjectFactory::Unpowered,
+        FactorySearch::Missing | FactorySearch::BuildLimitRefused => AresObjectFactory::Missing,
+    }
 }
 
 /// Original ObjectType5F7900, scanned in House+6C insertion order. A first

@@ -2,8 +2,8 @@
 
 use crate::map::scenario_menu::MapMenuEntry;
 use crate::skirmish_launch::{
-    LaunchStartPosition, LaunchTeam, LaunchValidationError, SKIRMISH_MAX_SLOT_COUNT,
-    SkirmishAiSlot, SkirmishLaunchMode, SkirmishLaunchSession, SkirmishLocalSlot,
+    LaunchStartPosition, LaunchTeam, LaunchValidationError, SkirmishAiSlot, SkirmishLaunchMode,
+    SkirmishLaunchSession, SkirmishLocalSlot,
 };
 use crate::skirmish_modes::SkirmishGameMode;
 
@@ -16,14 +16,20 @@ fn launch_start_position(
     match start_position {
         LaunchStartPosition::Auto => Ok(LaunchStartPosition::Auto),
         // VERA's maps with more than eight starts list them up to
-        // SKIRMISH_MAX_SLOT_COUNT.
-        LaunchStartPosition::Position(position) if position < SKIRMISH_MAX_SLOT_COUNT as u8 => {
-            Ok(LaunchStartPosition::Position(position))
-        }
+        // SKIRMISH_MAX_SLOT_COUNT, the domain the start reader owns.
         LaunchStartPosition::Position(position) => {
-            Err(LaunchValidationError::InvalidStartPosition { slot, position })
+            LaunchStartPosition::from_shell_value(i32::from(position))
+                .ok_or(LaunchValidationError::InvalidStartPosition { slot, position })
         }
     }
+}
+
+/// The shell's own Team list offers -2 (no team) and the native teams
+/// (0..=[`NATIVE_TEAMS`](crate::skirmish_launch::NATIVE_TEAMS)-1), so every
+/// team the shell holds is inside the team domain; a value outside it is no
+/// team.
+pub(super) fn shell_team(value: i32) -> LaunchTeam {
+    LaunchTeam::from_shell_value(value).unwrap_or(LaunchTeam::None)
 }
 
 /// A picked colour has to be one the lobby lists. A Random row's stored
@@ -45,13 +51,27 @@ fn launch_color_index(
     }
 }
 
+/// Whether Start skips the "at least two players" and "more than one team"
+/// gates ([`launch_session`]'s `allow_single_team`): `[VERA] SoloSkirmish=`,
+/// or a front end Ares plays in. Ares_AllowSinglePlay (hook `0x006AD0ED`,
+/// Ares.dll `10003AD0`) jumps from after the capacity check over both
+/// (`TXT_NEED_AT_LEAST_TWO_PLAYERS`, `TXT_CANNOT_ALLY`) to `0x006AD2BA`.
+/// `frontend_rules` are the shell's Rules, whose
+/// [`ares`](crate::rules::ruleset::RuleSet::ares) answers for the front end.
+pub fn start_skips_side_gates(
+    solo_skirmish: bool,
+    frontend_rules: Option<&crate::rules::ruleset::RuleSet>,
+) -> bool {
+    solo_skirmish || frontend_rules.is_some_and(crate::rules::ruleset::RuleSet::ares)
+}
+
 /// Pack the current controls into a Start session, or refuse a match that has
 /// fewer than two sides.
 ///
-/// `allow_single_team` is `[VERA] SoloSkirmish=`: it accepts an undisturbed
-/// test match, both with no opponent at all and with every active AI on the
-/// local player's own explicit team. Retail keeps both the "at least two
-/// players" and the "more than one team" gates.
+/// `allow_single_team` ([`start_skips_side_gates`]) accepts a match with no
+/// opponent at all and one with every active AI on the local player's own
+/// explicit team. Retail keeps both the "at least two players" and the "more
+/// than one team" gates.
 pub fn launch_session(
     state: &SkirmishShellState,
     maps: &[MapMenuEntry],
@@ -86,9 +106,7 @@ pub fn launch_session(
             .opponents
             .iter()
             .filter(|opponent| opponent.is_active())
-            .all(|opponent| {
-                LaunchTeam::from_shell_value(opponent.team) == LaunchTeam::Team(local_team)
-            });
+            .all(|opponent| shell_team(opponent.team) == LaunchTeam::Team(local_team));
         if all_active_ai_same_team {
             return Err(LaunchValidationError::SameExplicitTeam { team: local_team });
         }
@@ -131,7 +149,7 @@ pub fn pack_launch_session_without_start_validation(
         )?,
         color_random: !state.player_color_claimed,
         start_position: launch_start_position(0, state.player_start_position)?,
-        team: LaunchTeam::from_shell_value(state.player_team),
+        team: shell_team(state.player_team),
     };
 
     let mut opponents = Vec::new();
@@ -152,7 +170,7 @@ pub fn pack_launch_session_without_start_validation(
             )?,
             color_random: !opponent.color_claimed,
             start_position: launch_start_position(slot, opponent.start_position)?,
-            team: LaunchTeam::from_shell_value(opponent.team),
+            team: shell_team(opponent.team),
             difficulty,
         });
     }
