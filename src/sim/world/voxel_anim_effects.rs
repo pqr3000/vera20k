@@ -11,7 +11,7 @@
 
 use glam::IVec3;
 
-use super::{FrameEffects, Simulation, UninitContext};
+use super::{FrameEffects, SimSoundEvent, Simulation, UninitContext};
 use crate::rules::ruleset::RuleSet;
 use crate::rules::voxel_anim_type::VoxelAnimTypeId;
 use crate::sim::anim_class::AnimWorldCoord;
@@ -201,37 +201,40 @@ impl Simulation {
                     if let Some(name) = kind.bounce_anim.as_deref() {
                         self.spawn_named_anim(rules, name, anim_coord(old_location), 0, 0x600, 0);
                     }
-                    // RESIDUAL: native walks the cell's objects within
-                    // DamageRadius (X+Y distance) with no `Warhead=` too,
-                    // handing ReceiveDamage the type's own Damage and a null
-                    // warhead (`0x0074A884..0x0074A92E`); VERA skips the walk.
-                    // Every retail VoxelAnim with `Damage=` names a
-                    // `Warhead=`, but retail TIRE sets neither (Damage 0,
-                    // DamageRadius 0): a bounce on an object's exact XY
-                    // reaches TechnoClass::ReceiveDamage, which raises the
-                    // type's Damage to 1 (`0x00701900`), and a building there
-                    // loses 1 HP. It needs an exact-lepton hit.
-                    if let Some(name) = kind.warhead.as_deref() {
-                        let warhead = self.interner.intern(name);
-                        // 1005D640: a negative DamageRadius or a Damage of
-                        // zero skips the walk.
-                        let source = if rules.ares() {
-                            let damage = self.voxel_type_damage(type_id, rules);
-                            (kind.damage_radius >= 0 && damage != 0)
-                                .then_some(BounceContactDamage::AresVoxel(damage))
-                        } else {
-                            Some(BounceContactDamage::VoxelType(type_id))
-                        };
-                        if let Some(source) = source {
-                            changed |= self.apply_bounce_contact_damage(
-                                body.position_leptons(),
-                                kind.damage_radius,
-                                source,
-                                warhead,
-                                rules,
-                                effects,
-                            );
-                        }
+                    // Tiberian Sun's BounceSound= at the same Location, with
+                    // or without a BounceAnim=: Firestorm 2.0 VoxelAnimClass
+                    // AI 0x0065EC59..0x0065EC86. gamemd has no such sound.
+                    if let Some(sound) = kind.bounce_sound.as_deref() {
+                        self.sound_events.emit(SimSoundEvent::voc_at_world_coord(
+                            rules.sound_name(sound),
+                            anim_coord(old_location),
+                        ));
+                    }
+                    // VoxelAnimClass::AI 74A884..74A92E passes the Type's
+                    // Damage by address even with a null Warhead. The stock
+                    // TIRE can hit a CanC4=no building at its exact Location.
+                    // Ares 1005D659..1005D680 requires a warhead and nonzero
+                    // damage, and passes a separate copy to each receiver.
+                    let source = if rules.ares() {
+                        let damage = self.voxel_type_damage(type_id, rules);
+                        (kind.damage_radius >= 0 && damage != 0 && kind.warhead.is_some())
+                            .then_some(BounceContactDamage::AresVoxel(damage))
+                    } else {
+                        Some(BounceContactDamage::VoxelType(type_id))
+                    };
+                    if let Some(source) = source {
+                        let warhead = kind
+                            .warhead
+                            .as_deref()
+                            .map(|name| self.interner.intern(name));
+                        changed |= self.apply_bounce_contact_damage(
+                            body.position_leptons(),
+                            kind.damage_radius,
+                            source,
+                            warhead,
+                            rules,
+                            effects,
+                        );
                     }
                 }
             }
@@ -302,6 +305,15 @@ impl Simulation {
             return false;
         }
         let changed = self.voxel_anim_expire_damage(type_id, impact, rules, effects);
+        // Tiberian Sun's ExpireSound= at the retained Location on every dry
+        // expiry, with or without an ExpireAnim=: Firestorm 2.0 VoxelAnimClass
+        // AI 0x0065E482..0x0065E4AF. gamemd has no such sound.
+        if let Some(sound) = kind.expire_sound.as_deref() {
+            self.sound_events.emit(SimSoundEvent::voc_at_world_coord(
+                rules.sound_name(sound),
+                anim_coord(location),
+            ));
+        }
         let mut ore = Ok(());
         if kind.is_meteor {
             //74A288..301: two RandomRanged(0, SpawnCount) draws, then that
@@ -331,6 +343,11 @@ impl Simulation {
                         }
                     }
                 }
+            }
+            // Firestorm's meteor craters (Firestorm 2.0 0x65E58D), VERA's
+            // terrain deformation.
+            if !above {
+                self.dig_meteor_craters(impact, rules, effects);
             }
             //74A303..572: ore in the eight neighbours of the impact cell,
             // AdjacentCell89F688 order, never the impact cell itself; each
@@ -473,7 +490,7 @@ impl Simulation {
         position: IVec3,
         radius: i32,
         source: BounceContactDamage,
-        warhead_ref: InternedId,
+        warhead_ref: Option<InternedId>,
         rules: &RuleSet,
         effects: &mut FrameEffects<'_>,
     ) -> bool {
@@ -507,6 +524,7 @@ impl Simulation {
                     .wrapping_abs()
                     .wrapping_add(position.y.wrapping_sub(y).wrapping_abs());
                 if distance <= radius {
+                    let warhead_ref = warhead_ref.unwrap_or_else(|| self.interner.intern(""));
                     let distance_leptons = crate::util::native_x87::adjust_for_z_standard(distance);
                     let (damage, writeback) = match source {
                         BounceContactDamage::Anim(value) => (value, None),

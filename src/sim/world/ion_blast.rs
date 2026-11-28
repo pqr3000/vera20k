@@ -1,5 +1,6 @@
 //! IonBlastClass53CB10/53CBE0/53D310: one ordered vector for Dominator's
-//! forceless ripples and TAction94's damaging blast. Native vector AA0118,
+//! forceless ripples, TAction94's damaging blast and the Tiberian Sun Ion
+//! Cannon superweapon's (`sim::superweapon::ion_cannon`). Native vector AA0118,
 //! itemsAA011C/countAA0128, records coord/frame/skip-forces (14h bytes).
 //!
 //! Execute94's table entry6DD913 and IonBlastAtWP6E3380 use the tail
@@ -15,11 +16,11 @@
 //! Numeric evidence: tools/ion_blast_forces.json; frame retirement and ripple
 //! tables: tools/superweapon_oracle.json. Other flow rests on instructions.
 //!
-//! Native uses a process-global vector; this port does not establish its
-//! complete save/load and cross-scenario clearing behavior. Rust keeps it
-//! match-owned: pending damaging blasts are saved and hashed so match restore
-//! preserves future gameplay; visual-only blasts are omitted. Native global
-//! retention across world replacement remains an explicit coverage boundary.
+//! The native vector lives from process startup (53CA70) to exit (53CAB0).
+//! Clear_Scene (6851F0) leaves its plain Dominator ripples at their current
+//! ages across player load and scenario restart. The client holds these
+//! records between worlds. VERA omits visual blasts from saves and preserves
+//! pending damaging blasts in saves and hashes for deterministic restore.
 
 use super::{FrameEffects, Simulation};
 use crate::map::cell_index::NativeCellIdentity;
@@ -32,6 +33,7 @@ use crate::sim::ion_blast_ripple::{RippleFrames, spiral_point};
 use crate::sim::movement::{ground_pose, locomotor::MovementLayer};
 use crate::sim::projectile::ProjectileCoord;
 use crate::sim::rocking::ion_blast;
+use crate::util::forked::Forked;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
@@ -46,6 +48,29 @@ pub(crate) struct IonBlast {
     /// 100523D0): the warhead whose applyRipples (10051AE0) raised the blast.
     #[serde(default)]
     ares_warhead: Option<crate::sim::intern::InternedId>,
+}
+
+/// Dominator ripples between installed worlds. A live world advances them
+/// in Logic (55B64B); the load dialog and shell never visit that pass.
+#[derive(Default)]
+pub struct RetainedDominatorRipples(Vec<IonBlast>);
+
+impl RetainedDominatorRipples {
+    /// MindControlArea (53B0CB..53B0D4) creates a forceless record holding
+    /// only its coordinates and age. Ares PsyDom_Fire (10037840) uses the
+    /// same record. Warhead applyRipples (10051AE0) also maps a warhead.
+    pub fn take_from(&mut self, world: &mut Simulation) {
+        self.0.extend(world.ion_blasts.extract_if(.., |blast| {
+            blast.skip_forces && blast.ares_warhead.is_none()
+        }));
+    }
+
+    /// Older records precede incoming effects in constructor order (53CB10).
+    pub fn resume_in(&mut self, world: &mut Simulation) {
+        if !self.0.is_empty() {
+            world.ion_blasts.splice(..0, self.0.drain(..));
+        }
+    }
 }
 
 /// The stock fields hash as the derived hash did; an Ares warhead adds its
@@ -74,8 +99,12 @@ pub(super) fn save<S: serde::Serializer>(
 }
 pub(super) fn load<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<Vec<IonBlast>, D::Error> {
-    Vec::deserialize(deserializer)
+) -> Result<Forked<Vec<IonBlast>>, D::Error> {
+    // A file supplies the same pending damage that save writes. A visual
+    // ripple can return only from the live world's RetainedDominatorRipples.
+    let mut blasts = Vec::<IonBlast>::deserialize(deserializer)?;
+    blasts.retain(|blast| !blast.skip_forces);
+    Ok(Forked::new(blasts))
 }
 
 impl Simulation {
@@ -95,13 +124,21 @@ impl Simulation {
         let Some(coord) = self.trigger_waypoint_ground_coord(waypoint) else {
             return false;
         };
+        self.add_ion_cannon_blast(coord);
+        true
+    }
+
+    /// A damaging blast at `coord` (leptons): the constructor appends it at
+    /// frame 0 with its forces on. TAction94 and the Tiberian Sun Ion Cannon
+    /// (Firestorm 2.0 SuperClass::Place case 3, `new IonBlast` 0x60BEC6) build
+    /// one this way.
+    pub(crate) fn add_ion_cannon_blast(&mut self, coord: [i32; 3]) {
         self.ion_blasts.push(IonBlast {
             coord,
             frame: 0,
             skip_forces: false,
             ares_warhead: None,
         });
-        true
     }
 
     /// Ares WarheadTypeExt::applyRipples (installed 10051AE0), first in

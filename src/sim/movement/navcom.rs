@@ -8,7 +8,7 @@ use crate::map::resolved_terrain::ResolvedTerrainGrid;
 use crate::rules::locomotor_type::LocomotorKind;
 use crate::sim::components::{DriveCoord, NavTargetRef};
 use crate::sim::entity_store::EntityStore;
-use crate::sim::game_entity::GameEntity;
+use crate::sim::game_entity::{GameEntity, NameNote};
 use crate::sim::world::FrameEffects;
 #[cfg(test)]
 use crate::util::fixed_math::SimFixed;
@@ -177,9 +177,9 @@ impl NavigationState {
     /// class-setter call ([`Self::pending_destination_setter`]) settled by the
     /// setter it stood for.
     #[track_caller]
-    pub(crate) fn publish_nav_com(&mut self, nav_com: Option<NavTargetRef>) {
+    pub(crate) fn publish_nav_com(&mut self, nav_com: Option<NavTargetRef>, note: NameNote) {
         self.nav_com_aux = None;
-        self.store_nav_com(nav_com);
+        self.store_nav_com(nav_com, note);
         self.pending_destination_setter = false;
     }
 
@@ -188,7 +188,7 @@ impl NavigationState {
     #[track_caller]
     pub(crate) fn stop_moving(&mut self) {
         self.nav_com_aux = None;
-        self.store_nav_com(None);
+        self.clear_nav_com();
     }
 
     /// `FootClass::PointerExpired`'s NavCom arm: NavComAux (`0x004D9ABD`) and
@@ -196,7 +196,7 @@ impl NavigationState {
     #[track_caller]
     pub(crate) fn expire_nav_com(&mut self) {
         self.nav_com_aux = None;
-        self.store_nav_com(None);
+        self.clear_nav_com();
     }
 
     /// The destination prologue's NavComAux clear (vt+0x47C, `0x004D94A4`),
@@ -217,13 +217,18 @@ impl NavigationState {
     /// NULL when it refuses `0x00718213`) and UnitClass::PerCellProcess's dock
     /// restore (`0x0073A4E9`).
     #[track_caller]
-    pub(crate) fn store_nav_com(&mut self, nav_com: Option<NavTargetRef>) {
-        if nav_com.is_none()
-            && let Some(previous) = self.nav_com
-        {
+    pub(crate) fn store_nav_com(&mut self, nav_com: Option<NavTargetRef>, _: NameNote) {
+        match nav_com {
+            Some(target) => self.nav_com = Some(target),
+            None => self.clear_nav_com(),
+        }
+    }
+
+    #[track_caller]
+    fn clear_nav_com(&mut self) {
+        if let Some(previous) = self.nav_com.take() {
             log::trace!(target: "vera20k::path", "NavCom cleared previous={previous:?} caller={}", std::panic::Location::caller());
         }
-        self.nav_com = nav_com;
     }
 
     /// `FootClass::Override_Mission`'s save of NavCom into SuspendedNavCom
@@ -242,7 +247,7 @@ impl NavigationState {
     /// A fixture's NavCom.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_nav_com_for_test(&mut self, nav_com: Option<NavTargetRef>) {
-        self.nav_com = nav_com;
+        self.store_nav_com(nav_com, NameNote::fixture());
     }
 
     /// A fixture's NavComAux.
@@ -254,6 +259,7 @@ impl NavigationState {
     /// A fixture's SuspendedNavCom.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_suspended_nav_com_for_test(&mut self, suspended_nav_com: Option<NavTargetRef>) {
+        NameNote::fixture();
         self.suspended_nav_com = suspended_nav_com;
     }
 
@@ -265,6 +271,7 @@ impl NavigationState {
     /// A fixture's NavQueue.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_nav_queue_for_test(&mut self, nav_queue: Vec<NavTargetRef>) {
+        NameNote::fixture();
         self.nav_queue = nav_queue;
     }
 
@@ -275,7 +282,7 @@ impl NavigationState {
 
     /// Insert at the NavQueue's front (`DynamicVectorClass` growth then a
     /// `memmove` up and a store at index 0, `0x0074231E..0x00742374`).
-    pub(crate) fn push_nav_queue_front(&mut self, target: NavTargetRef) {
+    pub(crate) fn push_nav_queue_front(&mut self, target: NavTargetRef, _: NameNote) {
         self.nav_queue.insert(0, target);
     }
 
@@ -286,14 +293,14 @@ impl NavigationState {
 
     /// Unit7447B0 appends route posts, then returns the first through the
     /// same queue owner. Entries retain their native order and duplicates.
-    pub(crate) fn append_nav_queue(&mut self, target: NavTargetRef) {
+    pub(crate) fn append_nav_queue(&mut self, target: NavTargetRef, _: NameNote) {
         self.nav_queue.push(target);
     }
 
     /// Append to a fixture's NavQueue.
     #[cfg(any(test, feature = "test-support"))]
     pub fn push_nav_queue_for_test(&mut self, target: NavTargetRef) {
-        self.append_nav_queue(target);
+        self.append_nav_queue(target, NameNote::fixture());
     }
 
     /// Keep only the NavQueue entries `keep` accepts.
@@ -313,7 +320,7 @@ impl NavigationState {
 
     /// Unit741F40..741FB6 prepends a moving Drive's next destination without
     /// Queue_Navigation_List's self-reference or empty-list loop rewrites.
-    pub(crate) fn prepend_nav_list(&mut self, target: NavTargetRef) {
+    pub(crate) fn prepend_nav_list(&mut self, target: NavTargetRef, _: NameNote) {
         self.nav_list.insert(0, target);
     }
 
@@ -321,7 +328,7 @@ impl NavigationState {
     /// Foot naming itself on a list that has entries makes it loop instead
     /// of being appended; a target appended to an empty list first clears
     /// the loop.
-    pub(crate) fn queue_nav_list(&mut self, target: NavTargetRef, names_self: bool) {
+    pub(crate) fn queue_nav_list(&mut self, target: NavTargetRef, names_self: bool, _: NameNote) {
         if names_self && !self.nav_list.is_empty() {
             self.nav_list_loops = true;
             return;
@@ -336,7 +343,7 @@ impl NavigationState {
     /// inlined at `0x004DA068..0x004DA094`), whatever the send left there,
     /// and a looping list appends `head` again (`0x004A7FE0`, inlined at
     /// `0x004DA096..0x004DA0D8`).
-    pub(crate) fn rotate_nav_list(&mut self, head: NavTargetRef) {
+    pub(crate) fn rotate_nav_list(&mut self, head: NavTargetRef, _: NameNote) {
         if !self.nav_list.is_empty() {
             self.nav_list.remove(0);
         }
@@ -359,6 +366,7 @@ impl NavigationState {
     /// A fixture's navigation list and loop flag.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_nav_list_for_test(&mut self, nav_list: Vec<NavTargetRef>, loops: bool) {
+        NameNote::fixture();
         self.nav_list = nav_list;
         self.nav_list_loops = loops;
     }
@@ -842,7 +850,8 @@ pub(crate) fn publish_nav_com(entity: &mut GameEntity, target: NavTargetRef) {
         "Set_Destination unit={} cell={:?} NavCom={:?} -> {target:?}",
         entity.stable_id(), (entity.position.rx(), entity.position.ry()), entity.navigation.nav_com(),
     );
-    entity.navigation.publish_nav_com(Some(target));
+    let note = entity.note_names();
+    entity.navigation.publish_nav_com(Some(target), note);
     entity.release_fire_particle_system();
 }
 
@@ -853,7 +862,8 @@ pub(super) fn publish_null_nav_com(entity: &mut GameEntity) {
         "Set_Destination 0x4D9510 unit={} cell={:?} clearing NavCom={:?}",
         entity.stable_id(), (entity.position.rx(), entity.position.ry()), entity.navigation.nav_com(),
     );
-    entity.navigation.publish_nav_com(None);
+    let note = entity.note_names();
+    entity.navigation.publish_nav_com(None, note);
 }
 
 fn drive_set_destination(
@@ -1110,7 +1120,8 @@ impl crate::sim::world::Simulation {
             self.locomotor_stop_moving(id, rules, registry, frame_effects)
                 .unwrap_or_else(|cause| panic!("Foot null destination {id}: {cause}"));
             if let Some(entity) = self.substrate.entities.get_mut(id) {
-                entity.navigation.store_nav_com(None);
+                let note = entity.note_names();
+                entity.navigation.store_nav_com(None, note);
             }
         }
         let timing = super::DestinationTiming::from_rules(self.session.binary_frame(), rules);

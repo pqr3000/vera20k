@@ -553,6 +553,11 @@ pub struct ObjectType {
     /// `Soylent=` (TechnoType `+0x614`): when nonzero, the refund
     /// `TechnoTypeClass::GetRefund @ 0x00711F60` returns instead of the cost.
     pub soylent: i32,
+    /// `Points=` (TechnoType +0x728, initialized at 0x00711237 and read by
+    /// TechnoTypeClass::ReadINI at 0x007149A7). Exposed to Wasm
+    /// modules' TechnoType `Points` (RFC 0001 appendix 7.7); no simulation
+    /// rule uses it.
+    pub points: i32,
     /// `FactoryPlant=` (BuildingType `+0x16CD`): Unlimbo and ChangeOwner add
     /// the building to its House's FactoryPlant list (House `+0x140`).
     pub factory_plant: bool,
@@ -1703,6 +1708,20 @@ pub struct ObjectType {
     /// The Jumpjet cruise reads it on a Unit owner at arrival
     /// (`State3_Translate 0x0054C1FE`).
     pub is_simple_deployer: bool,
+    /// Tiberian Sun's `IsLimpetMine=` (docs/ts-limpets.md), a BuildingType
+    /// key: Firestorm 2.0 `BuildingTypeClass::Read_INI @ 0x00440A40` reads it
+    /// into BuildingType+0x890 with ReadBool over the current value
+    /// (`0x00440C27..0x00440C3B`); the constructor zeroes it (`0x0043F666`).
+    /// A limpet mine cannot be ordered to attack, and vehicles drive into
+    /// its cell (`sim::limpet`).
+    pub is_limpet_mine: bool,
+    /// Tiberian Sun's `IsLimpetDrone=` (docs/ts-limpets.md), a VehicleType
+    /// key: Firestorm 2.0 `UnitTypeClass::Read_INI @ 0x0065BBA0` reads it into
+    /// UnitType+0x4A2 with ReadBool over the current value
+    /// (`0x0065BE44..0x0065BE67`); the constructor zeroes it (`0x0065B764`).
+    /// Its readers run the Unit's Stage as a ten-frame loop and draw the
+    /// body from it (`sim::limpet::wrap_drone_stage`).
+    pub is_limpet_drone: bool,
     /// UnitType+E18/E19, original747862..747896: the Unit section's
     /// ReadBool SmallVisceroid/LargeVisceroid, distinct from General's type
     /// references with the same keys. Unit Unlimbo737BF5 reads these bytes.
@@ -2231,6 +2250,8 @@ pub struct ObjectType {
     /// Retained WeaponStruct and transport-port coordinates, projected from
     /// the ordered type reader rather than reconstructed from the final Image.
     weapon_offsets: crate::rules::weapon_offsets::WeaponOffsets,
+    /// Kratos' frozen status inputs (`kratos_freeze`): `Wreck` today.
+    kratos_freeze: crate::rules::kratos_freeze::FreezeRules,
 
     /// `WeaponCount=` (`TechnoTypeClass+0x80C`, ReadINI `0x00712873`). Bounds
     /// the `Weapon%d`/`EliteWeapon%d` loop; slots at or past it keep their
@@ -2448,7 +2469,8 @@ pub struct ObjectType {
     /// Whether this building can be toggled on/off by the player.
     /// Parsed from `TogglePower=yes` in rules.ini.
     /// Defaults to true for buildings (most can be powered down).
-    /// Triggers `TogglePower` cursor when hovering this building in power-toggle mode.
+    /// Triggers `TogglePower` cursor when hovering this building in power mode
+    /// ([`Self::can_toggle_power`]).
     pub toggle_power: bool,
 
     /// `InfantryGainSelfHeal=` (`BuildingTypeClass+0x1564`, read by the
@@ -2642,6 +2664,12 @@ pub struct ObjectType {
     /// default at `0x005243B8`). No stock INI authors it. See
     /// [`ObjectType::emits_damage_spark`] for the spark flag it feeds.
     pub cyborg: bool,
+    /// Tiberian Sun Firestorm's InfantryType `IsWebImmune=` (`+0x4B7`, read
+    /// with the current value as default by `InfantryTypeClass::Read_INI`
+    /// `0x004DA8E0` at `0x004DAB40`; constructor false, `0x004DA229`): a web
+    /// leaves this infantryman alone (`docs/ts-webs.md`). gamemd has no
+    /// such key.
+    pub is_web_immune: bool,
     /// TechnoType `+0xC8F`, projected from the Rules passes: see
     /// [`ObjectType::emits_damage_spark`].
     pub damage_sparks: bool,

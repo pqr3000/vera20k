@@ -15,25 +15,29 @@ impl Simulation {
         rules: &RuleSet,
         registry: Option<&OverlayTypeRegistry>,
     ) -> bool {
-        let (Some(registry), Some(terrain), Some(overlays)) = (
-            registry,
-            self.resolved_terrain.as_mut(),
-            self.overlay_grid.as_mut(),
-        ) else {
-            return false;
-        };
-        let Some(index) = terrain.native_fixed_cell_index(coord.0 as i16, coord.1 as i16) else {
+        let (Some(registry), Some(overlays)) = (registry, self.overlay_grid.as_ref()) else {
             return false;
         };
         let Some(overlay) = overlays.finalized_map_cell(coord.0, coord.1) else {
             return false;
         };
+        let Some(index) = self
+            .resolved_terrain
+            .as_ref()
+            .and_then(|terrain| terrain.native_fixed_cell_index(coord.0 as i16, coord.1 as i16))
+        else {
+            return false;
+        };
+        let terrain = self
+            .resolved_terrain
+            .as_mut()
+            .expect("looked up terrain cell");
         let outcome = match terrain.recalc_resident_bridge_cell(
             index,
             overlay,
             -1,
             registry,
-            self.playfield_bounds,
+            *self.playfield_bounds,
         ) {
             Ok(outcome) => outcome,
             Err(crate::map::resolved_terrain::LoadCellRecalcError::MissingResidentInputs) => {
@@ -44,7 +48,12 @@ impl Simulation {
                 return false;
             }
         };
-        overlays.write_finalized_map_cell(coord.0, coord.1, outcome.finalized);
+        // A fork whose overlay already holds the finalized pair keeps sharing it.
+        if !overlays.holds_finalized_map_cell(coord.0, coord.1, outcome.finalized)
+            && let Some(overlays) = self.overlay_grid.as_mut()
+        {
+            overlays.write_finalized_map_cell(coord.0, coord.1, outcome.finalized);
+        }
         // RecalcZoneType483D94 also tests a powered Firestorm.Wall section
         // in an Ares game. The resident tile pass has no object list.
         if self.ares_firestorm.any_active()
@@ -106,7 +115,7 @@ impl Simulation {
             zones: &mut self.zone_grid,
             path: &mut self.path_grid,
             overlays: self.overlay_grid.as_ref(),
-            playfield_bounds: self.playfield_bounds,
+            playfield_bounds: *self.playfield_bounds,
         };
         let result = if recalculated {
             caches.publish_recalculated_cell_with_presence(terrain, coord, structure_blocked)

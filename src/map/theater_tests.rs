@@ -668,6 +668,47 @@ fn retail_lunar_water_family_uses_the_original_postpass() {
     assert!(TileIds::resolve(&theater).is_water_shore_or_waterfall(0));
 }
 
+/// Retail SNOWMD.INI names Ice1Set..IceShoreSet but gives those sets no
+/// tiles, so the retail snow theater runs no ice (docs/ts-ice.md).
+#[test]
+fn retail_snow_theater_runs_no_ice() {
+    let Some((_, mut assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
+        return;
+    };
+    let theater = load_theater(&mut assets, "SNOW").expect("load retail snow theater");
+    let ini = IniFile::from_bytes(&theater.ini_data).expect("SNOWMD.INI");
+    let general = ini.section("General").expect("[General]");
+    for key in ["Ice1Set", "Ice2Set", "Ice3Set", "IceShoreSet"] {
+        let set = usize::try_from(general.read_int(key, -1)).expect(key);
+        assert_eq!(theater.lookup.bounds()[set].count, 0, "{key}");
+    }
+    assert_eq!(theater.ice_sets, None);
+}
+
+#[test]
+fn an_ice_map_gets_bundled_tiles_then_an_ordinary_snow_map_gets_stock_tiles() {
+    let Some((_, mut assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
+        return;
+    };
+    let map = IniFile::from_str("[Map]\nTheater=SNOW\nVeraIce=yes\n");
+    let ice = load_scenario_theater(&mut assets, "SNOW", &map, true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ice.ice_sets, Some([4096, 4160, 4224]));
+    assert_eq!(ice.lookup.filename(964), None);
+    let cracked = ice.lookup.filename(4112).unwrap();
+    let (bytes, source) = assets.get_with_source_ref(cracked).unwrap();
+    assert_eq!(source, "vera_ice.mix");
+    assert!(TmpFile::from_bytes(bytes).is_ok());
+
+    let stock = load_scenario_theater(&mut assets, "SNOW", &IniFile::empty(), false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stock.ice_sets, None);
+    assert_eq!(stock.lookup.filename(4096), None);
+    assert_eq!(ice.lookup.filename(963), stock.lookup.filename(963));
+}
+
 #[test]
 fn selected_retail_temperate_rmg_roles_reach_tile_ids() {
     use crate::map::rmg::tiles::TileIds;
@@ -1261,6 +1302,8 @@ fn synthetic_theater_with_bridge_keys(
         automatic_tube_bases: [-1; 4],
         cliff_ranges: TheaterCliffRanges::default(),
         rmg_tiles: super::RmgTileKeys::default(),
+        ice_sets: None,
+        terrain_files: crate::map::theater::TerrainFiles::GameFolder,
     }
 }
 
@@ -1444,6 +1487,69 @@ fn load_theater_prefers_the_profile_theater_ini_then_the_stock_name() {
         AssetManager::from_loose_root_for_test(dir.path()).with_selected_ini_roots(roots);
     let theater = load_theater(&mut assets, "TEMPERATE").expect("profile theater INI");
     assert_eq!(theater.ini_data, profile_ini);
+}
+
+/// A one-cell 8x4 TMP whose diamond pixels are palette index 1.
+fn one_cell_tmp() -> Vec<u8> {
+    let mut data = Vec::new();
+    for word in [1u32, 1, 8, 4, 20] {
+        data.extend_from_slice(&word.to_le_bytes());
+    }
+    data.extend_from_slice(&[0u8; 40]);
+    data.extend_from_slice(&[0, 0, 0]);
+    data.extend_from_slice(&[0u8; 9]);
+    data.extend_from_slice(&[1u8; 16]);
+    data
+}
+
+/// VERA-only (docs/picture-model-art.md): a tileset that declares
+/// `PictureFileName=` draws its cells' colours from the template picture,
+/// shrunk from 2x by coverage, and keeps the TMP's Z and canvas; a picture
+/// that does not fit the TMP's cells leaves the TMP's own pixels.
+#[test]
+fn a_tile_picture_draws_its_cells_and_a_misfit_keeps_the_tmp() {
+    use crate::map::source::test_support::TestDirectory;
+    let directory = TestDirectory::new("tile-picture");
+    directory.write("clear01.tem", &one_cell_tmp());
+    directory.write("misfit01.tem", &one_cell_tmp());
+    let red = [200u8, 10, 20, 255].repeat(16 * 8);
+    let picture =
+        |width, height, rgba: &[u8]| crate::assets::picture_file::encode_frames(width, height, &[rgba.to_vec()]).unwrap();
+    directory.write("hd01.png", &picture(16, 8, &red));
+    directory.write("bad01.png", &picture(9, 4, &[200u8, 10, 20, 255].repeat(9 * 4)));
+    let assets = AssetManager::from_loose_root_for_test(directory.path());
+    let lookup = parse_tileset_ini(
+        b"[TileSet0000]\nFileName=clear\nTilesInSet=1\nPictureFileName=hd\n\
+          [TileSet0001]\nFileName=misfit\nTilesInSet=1\nPictureFileName=bad\n",
+        "tem",
+    )
+    .unwrap();
+    let mut colors = [0u8; 768];
+    colors[3..6].copy_from_slice(&[10, 20, 30]);
+    let palette = crate::assets::pal_file::Palette::from_bytes(&colors).unwrap();
+    let key = |tile_id| TileKey {
+        tile_id,
+        sub_tile: 0,
+        variant: 0,
+    };
+    let images = load_tile_images(&assets, &lookup, &palette, &HashSet::from([key(0), key(1)]));
+
+    let drawn = &images[&key(0)];
+    assert_eq!([drawn.width, drawn.height], [8, 4]);
+    assert!(
+        drawn
+            .rgba
+            .chunks_exact(4)
+            .all(|pixel| pixel == [200, 10, 20, 255]),
+        "every game pixel takes the picture's colour, opaque"
+    );
+    let tmp = TmpFile::from_bytes(&one_cell_tmp()).unwrap();
+    assert_eq!(drawn.depth, tmp.tiles[0].as_ref().unwrap().depth);
+    assert_eq!(
+        images[&key(1)].rgba,
+        tmp.tile_to_rgba(0, &palette).unwrap(),
+        "a 9x4 picture is no whole multiple of the 8x4 cell: the TMP draws"
+    );
 }
 
 /// VERA: a load of the original terrain reads the theater INI and tiles a

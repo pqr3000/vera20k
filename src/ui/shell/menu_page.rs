@@ -63,6 +63,13 @@ impl MenuPageButtonSpec {
         }
     }
 
+    pub(crate) fn node(&self) -> NodeSpec {
+        NodeSpec::new(NodeKind::Button)
+            .id(i32::from(self.id))
+            .label(self.csf_key)
+            .tooltip(self.tooltip_key)
+    }
+
     /// The same button at template top `dlu_top`.
     pub const fn at(self, dlu_top: i32) -> Self {
         Self { dlu_top, ..self }
@@ -101,12 +108,7 @@ impl MenuPageSpec {
 
     /// The page's buttons as nodes: resource id, caption and status help.
     pub fn nodes(&self) -> NodeSpec {
-        NodeSpec::new(NodeKind::Dialog).children(self.buttons().map(|b| {
-            NodeSpec::new(NodeKind::Button)
-                .id(i32::from(b.id))
-                .label(b.csf_key)
-                .tooltip(b.tooltip_key)
-        }))
+        NodeSpec::new(NodeKind::Dialog).children(self.buttons().map(MenuPageButtonSpec::node))
     }
 }
 
@@ -138,6 +140,24 @@ pub fn sync_nodes(
     for &(id, on) in enabled {
         super::page::set(gui, root, id, Prop::Enabled, Value::Bool(on));
     }
+}
+
+/// A box whose input builds its widgets from [`ShellBox::nodes`] put on
+/// `parts` in `shell_box.dialog`'s live instance, before it paints: built
+/// once, then [`ShellBox::sync`]. Its root; none while the dialog is not up.
+///
+/// [`ShellBox::nodes`]: super::modal::ShellBox::nodes
+/// [`ShellBox::sync`]: super::modal::ShellBox::sync
+pub fn sync_box(
+    controller: &mut DialogController,
+    shell_box: &super::modal::ShellBox,
+    parts: &super::modal::BoxParts,
+) -> Option<vera20k_gui::NodeId> {
+    let root = controller.root_in(shell_box.dialog)?;
+    let gui = controller.gui_mut();
+    super::page::ensure_built(gui, root, || shell_box.nodes());
+    shell_box.sync(gui, root, parts);
+    Some(root)
 }
 
 /// The control `dialog`'s live instance holds captured.

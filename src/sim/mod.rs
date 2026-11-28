@@ -83,6 +83,7 @@ pub mod intern;
 pub(crate) mod kamikaze; // missiles out of their launcher's control (0x00ABC5F8)
 pub(crate) mod lifecycle_request;
 pub mod light_sources;
+pub(crate) mod limpet; // Tiberian Sun limpets (Firestorm 2.0 Fire_At 0x006301A0)
 pub(crate) mod locomotor_lift; // the Magnetron's IsLocomotor= lift (ImbueLocomotor 0x00710000)
 pub mod multiplayer_checksum;
 pub mod native_identity;
@@ -232,6 +233,8 @@ pub mod houses;
 // --- Trigger runtime (map trigger evaluation during gameplay) ---
 pub mod team_script_vm;
 pub mod trigger_runtime;
+// Wasm extension modules: the module phase and the vera:sim host (RFC 0001).
+pub mod ext_modules;
 
 // --- AI, replay, selection, debug ---
 pub(crate) mod ai_build_need;

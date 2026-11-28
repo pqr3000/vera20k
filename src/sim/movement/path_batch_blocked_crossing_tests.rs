@@ -40,7 +40,7 @@ fn a_crossing_opened_before_the_movers_turn_keeps_its_move_order() {
         if batched {
             sim.batch_path_searches();
             register_as(&mut sim, &[mover], WaitingRequest::NoQueue);
-            sim.answer_batched_path_searches(&rules);
+            sim.answer_batched_work(&rules, None);
             assert_eq!(sim.path_batch_stats().unwrap().searched, 1);
         }
         if opens {

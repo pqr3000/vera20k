@@ -159,8 +159,8 @@ fn single_tank_and_platoon_cross_the_same_flat_causeway() {
             .collect();
         for batched in [false, true] {
             let mut sim = crate::sim::arena_fixture::rival_arena(&resources.rules, u64::from(SEED));
-            sim.overlay_grid = Some(crate::sim::overlay_grid::OverlayGrid::new(32, 32));
-            sim.fog = crate::sim::vision::FogState::new(32, 32);
+            *sim.overlay_grid = Some(crate::sim::overlay_grid::OverlayGrid::new(32, 32));
+            *sim.fog = crate::sim::vision::FogState::new(32, 32);
             for house in sim.houses.values_mut() {
                 house.set_multiplay_passive_for_test(true);
             }

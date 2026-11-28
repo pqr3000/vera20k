@@ -3,8 +3,14 @@
 //! pointer event belongs to it.
 
 use super::dialog_page::InGameDialog;
-use crate::app::AppState;
-use crate::ui::shell::connection::{self, ConnectionButton, connection_layout};
+use crate::app::PlatformState;
+use crate::app::frontend::state::FrontendState;
+use crate::app::match_runtime::state::MatchState;
+use crate::app::persistence::PersistenceState;
+use crate::app::process_assets::ProcessAssets;
+use crate::app::renderer_state::RendererState;
+use crate::audio::sfx::SfxPlayer;
+use crate::ui::shell::connection::{self, ConnectionButton, ConnectionLayout, connection_layout};
 use crate::ui::shell::page::PageEvent;
 use winit::event::MouseButton;
 
@@ -15,41 +21,113 @@ pub(crate) const DIALOG: InGameDialog = InGameDialog {
     title: None,
     lower: (0x2, connection::QUIT_LABEL),
     label: "Active Connection Shell EA",
-    ui: |state| Some(&state.match_state.match_presentation.connection_ui),
-    ui_mut: |state| Some(&mut state.match_state.match_presentation.connection_ui),
+    ui: |presentation| Some(&presentation.connection_ui),
+    ui_mut: |presentation| Some(&mut presentation.connection_ui),
     own_checkbox_sound: false,
+    help_under_held: false,
+    help_fallback: |_| "",
 };
 
-/// One pointer message on 0xEA (`down`: `None` moves).
-fn pointer(state: &mut AppState, down: Option<bool>) {
-    let Some(layout) = super::dialog_page::layout(state, connection_layout) else {
-        return;
+/// Whether 0xEA is open; its controls start afresh on a new dialog.
+fn open_controls(match_state: &mut MatchState) -> bool {
+    let Some(page) = match_state.network_wait.page_mut() else {
+        return false;
     };
-    let event = super::dialog_page::shell_event(state, down);
-    let presentation = &mut state.match_state.match_presentation;
-    let Some(page) = state.match_state.network_wait.page_mut() else {
-        return;
-    };
-    let ui = &mut presentation.connection_ui;
     if !std::mem::replace(&mut page.controls_built, true) {
-        *ui = Default::default();
+        match_state.match_presentation.connection_ui = Default::default();
     }
+    true
+}
+
+/// Makes 0xEA's nodes current without input (rects, the bars, the list):
+/// its renderer's call every drawn frame before it paints from them.
+pub(crate) fn sync(
+    platform: &PlatformState,
+    renderer: &RendererState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    persistence: &PersistenceState,
+) -> Option<ConnectionLayout> {
+    let layout = super::dialog_page::layout(
+        platform,
+        renderer,
+        frontend,
+        match_state,
+        persistence,
+        connection_layout,
+    )?;
+    if !open_controls(match_state) {
+        return None;
+    }
+    let match_state = match_state;
+    let wait = &match_state.network_wait;
+    let page = wait.page()?;
+    let ui = &mut match_state.match_presentation.connection_ui;
+    super::dialog_page::sync_dialog(
+        ui,
+        connection::DIALOG,
+        connection::spec,
+        |id| page.rect(&layout, id),
+        |gui, root| connection::sync_nodes(gui, root, page, |source| wait.bar_timing(source)),
+    );
+    Some(layout)
+}
+
+/// One pointer message on 0xEA (`down`: `None` moves).
+fn pointer(
+    platform: &PlatformState,
+    renderer: &RendererState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    process_assets: &ProcessAssets,
+    sfx_player: &mut Option<SfxPlayer>,
+    persistence: &PersistenceState,
+    down: Option<bool>,
+) {
+    let Some(layout) = super::dialog_page::layout(
+        platform,
+        renderer,
+        frontend,
+        match_state,
+        persistence,
+        connection_layout,
+    ) else {
+        return;
+    };
+    let event = super::dialog_page::shell_event(
+        platform,
+        renderer,
+        &frontend.screen,
+        match_state,
+        persistence,
+        down,
+    );
+    if !open_controls(match_state) {
+        return;
+    }
+    let match_state = match_state;
+    let wait = &match_state.network_wait;
+    let Some(page) = wait.page() else {
+        return;
+    };
+    let ui = &mut match_state.match_presentation.connection_ui;
     let events = super::dialog_page::route(
         ui,
         connection::DIALOG,
         connection::spec,
         |id| page.rect(&layout, id),
-        super::dialog_page::no_sync,
+        |gui, root| connection::sync_nodes(gui, root, page, |source| wait.bar_timing(source)),
         event,
     );
     // Owner-draw buttons play GUIMainButtonSound at button-down
     // (0x0061374B..0x00613771).
-    for event in super::dialog_page::play_cues(state, events) {
+    for event in
+        super::dialog_page::play_cues(frontend, match_state, process_assets, sfx_player, events)
+    {
         let PageEvent::Activated(id) = event else {
             continue;
         };
-        let Some(button) = state
-            .match_state
+        let Some(button) = match_state
             .network_wait
             .page()
             .and_then(|page| page.button(id))
@@ -57,31 +135,75 @@ fn pointer(state: &mut AppState, down: Option<bool>) {
             continue;
         };
         match button {
-            ConnectionButton::Quit => {
-                crate::app::match_runtime::network_match::request_leave(state)
-            }
+            ConnectionButton::Quit => crate::app::match_runtime::network_match::request_leave(
+                &mut match_state.network_wait,
+            ),
             ConnectionButton::Player(row) => {
-                crate::app::match_runtime::network_match::propose_kick(state, row)
+                crate::app::match_runtime::network_match::propose_kick(
+                    platform,
+                    renderer,
+                    &frontend.screen,
+                    match_state,
+                    persistence,
+                    process_assets,
+                    row,
+                )
             }
             ConnectionButton::PreviousPage | ConnectionButton::NextPage => {
-                if let Some(page) = state.match_state.network_wait.page_mut()
+                if let Some(page) = match_state.network_wait.page_mut()
                     && page.change_page(button == ConnectionButton::NextPage)
                 {
-                    let ui = &mut state.match_state.match_presentation.connection_ui;
+                    let ui = &mut match_state.match_presentation.connection_ui;
                     ui.restart_instance(connection::DIALOG);
                 }
-                state.platform.window.request_redraw();
+                platform.window.request_redraw();
             }
         }
     }
 }
 
-pub(crate) fn cursor_moved(state: &mut AppState) {
-    pointer(state, None);
+pub(crate) fn cursor_moved(
+    platform: &PlatformState,
+    renderer: &RendererState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    process_assets: &ProcessAssets,
+    sfx_player: &mut Option<SfxPlayer>,
+    persistence: &PersistenceState,
+) {
+    pointer(
+        platform,
+        renderer,
+        frontend,
+        match_state,
+        process_assets,
+        sfx_player,
+        persistence,
+        None,
+    );
 }
 
-pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
+pub(crate) fn mouse(
+    platform: &PlatformState,
+    renderer: &RendererState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    process_assets: &ProcessAssets,
+    sfx_player: &mut Option<SfxPlayer>,
+    persistence: &PersistenceState,
+    button: MouseButton,
+    pressed: bool,
+) {
     if button == MouseButton::Left {
-        pointer(state, Some(pressed));
+        pointer(
+            platform,
+            renderer,
+            frontend,
+            match_state,
+            process_assets,
+            sfx_player,
+            persistence,
+            Some(pressed),
+        );
     }
 }

@@ -1,119 +1,149 @@
 //! In-battle Diplomacy 0x73 over the active-game shell (621FB1 -> 72F540):
 //! title, Return and status line in the right-panel places, the rows and
 //! headers as ordinary children.
+//!
+//! Return, the paging buttons and VERA's "page n of m" line, the headers,
+//! the rows (insignia, names and kills in the House colour, the dual-state
+//! Allies and the Chat boxes, dimmed while disabled), Taunts and the mode
+//! and map statics paint from the dialog's `vera20k-gui` nodes
+//! ([`super::gui_paint`]), made current first every frame.
 
-use super::SHELL_CONTROL_DEPTH;
-use super::chrome::push_flag_entry_clipped_centered;
-use super::controls::{ControlPaint, paint_control};
-use crate::app::AppState;
-use crate::app::input::dialog_page::pressed;
+use super::gui_paint::{ButtonArt, GuiStyle};
+use crate::app::frontend::state::FrontendState;
 use crate::app::input::diplomacy::DIALOG;
-use crate::ui::shell::checkbox::CheckboxFace;
-use crate::ui::shell::diplomacy::{DiplomacyControl, DiplomacyHeader, diplomacy_layout};
-use crate::ui::shell::geom::ShellAlign;
-
-fn face(checked: bool) -> CheckboxFace {
-    if checked {
-        CheckboxFace::Checked
-    } else {
-        CheckboxFace::Unchecked
-    }
-}
+use crate::app::match_runtime::state::MatchState;
+use crate::app::persistence::PersistenceState;
+use crate::app::process_assets::ProcessAssets;
+use crate::app::renderer_state::RendererState;
+use crate::app::state::PlatformState;
+use crate::ui::shell::diplomacy::{
+    DIPLOMACY_ROWS, DiplomacyControl, DiplomacyHeader, TAUNTS_LABEL,
+};
+use crate::ui::shell::paging;
 
 pub(crate) fn render_diplomacy_shell(
-    state: &mut AppState,
+    platform: &mut PlatformState,
+    renderer: &mut RendererState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    process_assets: &ProcessAssets,
+    persistence: &PersistenceState,
     encoder: &mut wgpu::CommandEncoder,
     destination: &wgpu::Texture,
 ) -> anyhow::Result<()> {
-    super::in_game_shell::paint_dialog(state, encoder, destination, &DIALOG, |paint, ui| {
-        let state = paint.state;
-        let layout = paint.shell.place(diplomacy_layout);
-        let view = crate::app::input::diplomacy::view(state);
-        if view.page_count > 1 {
-            let held = [DiplomacyControl::PreviousPage, DiplomacyControl::NextPage]
-                .map(|c| pressed(ui, c.id()));
-            paint.paging(layout.paging, held, view.page_index + 1, view.page_count);
-        }
-        // Title 0x694 is SS_CENTER; every other static is left-aligned.
-        for header in DiplomacyHeader::ALL {
-            let shown = match header {
-                DiplomacyHeader::Allies => view.allies_header,
-                DiplomacyHeader::Chat => view.chat_header,
-                DiplomacyHeader::Player | DiplomacyHeader::Kills => true,
+    let (_, view) = crate::app::input::diplomacy::sync(
+        platform,
+        renderer,
+        frontend,
+        match_state,
+        process_assets,
+        persistence,
+    )
+    .expect("active 0x73 geometry");
+    let frame = super::in_game_shell::paint_dialog(
+        platform,
+        renderer,
+        frontend,
+        match_state,
+        process_assets,
+        persistence,
+        &DIALOG,
+        |paint, ui| {
+            let (ime, bit_font) = (&platform.ime, &renderer.bit_font);
+            let text_of = |id: i32| -> Option<String> {
+                let id = u16::try_from(id).ok()?;
+                if id == paging::COUNTER {
+                    return Some(paging::counter_text(view.page_index, view.page_count));
+                }
+                let (key, fallback) = if id == DiplomacyControl::Taunts.id() {
+                    TAUNTS_LABEL
+                } else {
+                    DiplomacyHeader::ALL
+                        .into_iter()
+                        .find(|header| DiplomacyControl::Header(*header).id() == id)?
+                        .label()
+                };
+                Some(process_assets.csf_label(key, fallback))
             };
-            if shown {
-                let caption = paint.label(header.label());
-                paint.text(&caption, layout.headers[header as usize], ShellAlign::NONE);
-            }
-        }
-        let chrome = state.frontend.skirmish_shell_chrome.as_ref();
-        let control_chrome = chrome
-            .map(|atlas| atlas.control_chrome())
-            .unwrap_or_default();
-        let checkbox = |controls: &mut Vec<_>, face, enabled: bool, rect| {
-            let control = ControlPaint::StatefulCheckbox {
-                face,
-                disabled: !enabled,
-                rect,
+            let style = GuiStyle {
+                buttons: ButtonArt::Side,
+                side: Some(paint.side_buttons()),
+                text_of: Some(&text_of),
+                dim_disabled_checkboxes: true,
+                ..Default::default()
             };
-            paint_control(
-                controls,
-                &control_chrome,
-                control,
-                crate::ui::shell::geom::RETAIL_SCALE,
+            // The paging buttons and their counter show only where there is
+            // more than one page.
+            paint.nodes(
+                ime,
+                bit_font,
+                frontend,
+                match_state,
+                process_assets,
+                ui,
+                &[paging::PREVIOUS, paging::NEXT, paging::COUNTER],
+                style,
             );
-        };
-        for (row, shown) in view.rows.iter().enumerate() {
-            let Some(shown) = shown else {
-                continue;
-            };
-            let insignia = shown.insignia.as_deref();
-            if let Some(entry) = insignia.and_then(|name| chrome?.lan_player_side(name)) {
-                let rect = layout.insignia[row];
-                push_flag_entry_clipped_centered(
-                    &mut paint.controls,
-                    entry,
-                    rect,
-                    crate::ui::shell::geom::RETAIL_SCALE,
-                    SHELL_CONTROL_DEPTH,
-                );
-            }
-            let rgb = shown.rgb.map(|unit| f32::from(unit) / 255.0);
-            paint.text_rgb(&shown.name, layout.names[row], rgb, ShellAlign::NONE);
-            if let Some(kills) = shown.kills {
-                paint.text_rgb(&kills.to_string(), layout.kills[row], rgb, ShellAlign::NONE);
-            }
-            if let Some(allies) = shown.allies {
-                checkbox(
-                    &mut paint.controls,
-                    allies.face(),
-                    allies.enabled,
-                    layout.allies[row],
-                );
-            }
-            if let Some(chat) = shown.chat {
-                checkbox(
-                    &mut paint.controls,
-                    face(chat.checked),
-                    chat.enabled,
-                    layout.chat[row],
-                );
-            }
-        }
-        if let Some(checked) = view.taunts {
-            checkbox(&mut paint.controls, face(checked), true, layout.taunts);
-            // The checkbox proc draws its caption 26 px right of the box,
-            // vertically centred (0x0061663A..0x00616674).
-            let caption = paint.label(("GUI:TauntsOn", "Taunts On"));
-            let at = crate::ui::skirmish_shell::checkbox_text_rect(
-                layout.taunts,
-                crate::ui::shell::geom::RETAIL_SCALE,
+            // The Allies and Chat headers hide as their columns do.
+            let headers = DiplomacyHeader::ALL.map(|header| DiplomacyControl::Header(header).id());
+            paint.nodes(
+                ime,
+                bit_font,
+                frontend,
+                match_state,
+                process_assets,
+                ui,
+                &headers,
+                style,
             );
-            paint.text(&caption, at, ShellAlign::V_CENTER);
-        }
-        if let Some(mode_name) = &view.mode_name {
-            paint.text(mode_name, layout.mode_name, ShellAlign::NONE);
-        }
-        paint.text(&view.map_name, layout.map_name, ShellAlign::NONE);
-    })
+            for row in 0..DIPLOMACY_ROWS {
+                let ids = [
+                    DiplomacyControl::Insignia(row),
+                    DiplomacyControl::Name(row),
+                    DiplomacyControl::Kills(row),
+                    DiplomacyControl::Allies(row),
+                    DiplomacyControl::Chat(row),
+                ]
+                .map(|c| c.id());
+                paint.nodes(
+                    ime,
+                    bit_font,
+                    frontend,
+                    match_state,
+                    process_assets,
+                    ui,
+                    &ids,
+                    style,
+                );
+            }
+            // Taunts with its caption 26 px right of the box, vertically centred
+            // (0x0061663A..0x00616674), then the mode and map statics.
+            let tail = [
+                DiplomacyControl::Taunts,
+                DiplomacyControl::ModeName,
+                DiplomacyControl::MapName,
+            ]
+            .map(|c| c.id());
+            paint.nodes(
+                ime,
+                bit_font,
+                frontend,
+                match_state,
+                process_assets,
+                ui,
+                &tail,
+                style,
+            );
+        },
+    );
+    super::in_game_shell::render_in_game_shell_frame(
+        platform,
+        renderer,
+        frontend,
+        match_state,
+        persistence,
+        encoder,
+        destination,
+        frame,
+    )
 }

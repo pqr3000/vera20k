@@ -2,6 +2,8 @@
 //! command scheduling, camera, cursor, entity picking, sidebar gadget input,
 //! in-game options input, tooltips, and messages.
 
+#[cfg(any(target_os = "android", test))]
+pub mod android_mouse;
 pub(crate) mod autoload;
 pub(crate) mod smart_command;
 pub(crate) mod build_repeat;
@@ -24,7 +26,7 @@ pub(crate) mod ferry;
 pub(crate) mod primary_rotation;
 pub(crate) mod formation_line;
 pub(crate) mod formation_lock;
-pub(crate) mod gadget_input;
+pub(crate) mod chrome_input;
 pub(crate) mod layout_edit;
 pub(crate) mod hotkeys;
 pub(crate) mod ime;
@@ -36,12 +38,10 @@ pub(crate) mod precedence;
 pub(crate) mod radar;
 pub(crate) mod sidebar_eva;
 pub(crate) mod state;
-#[cfg(feature = "phobos")]
-pub(crate) mod sw_sidebar;
 pub(crate) mod superweapon_cameo;
-pub(crate) mod page_user;
 pub(crate) mod taunt;
 pub(crate) mod beacon;
+pub(crate) mod power_mode;
 pub(crate) mod tooltips;
 pub(crate) mod transport_orders;
 
